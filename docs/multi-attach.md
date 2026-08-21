@@ -198,6 +198,14 @@ Two lessons from making the change, recorded so they are not re-learned:
   north-south counters. The counter should key on the Port's gateway *role* rather
   than the datapath flag; until it does, a VPC running a tenant router reads high
   on `cozyplane_vpc_ns_bytes_total{door="gateway"}`.
+- **A KubeVirt VM sees only entry 0.** This document's mechanism is the pod's,
+  and a VM is a guest inside the `virt-launcher` pod, not the pod itself. KubeVirt
+  wires only the interfaces named in `spec.networks`, which admits `pod: {}` and
+  `multus: {}` and nothing else — so a secondary interface cozyplane adds to the
+  launcher is configured, addressed, and never bridged into the guest. Multi-NIC
+  VMs go through a generated `NetworkAttachmentDefinition` and the plugin's
+  delegate mode; see [kubevirt-multi-nic.md](kubevirt-multi-nic.md). Relevant here
+  because the appliance in §6 is a container, and an opnsense or VyOS one is not.
 - **Interface count is bounded** by the host veth name: `IFNAMSIZ` leaves 15
   characters and the existing `cph` + 11 of the container ID uses 14, so the index
   takes the one remaining character. Ten attachments per pod, which is well past
@@ -253,7 +261,7 @@ your own workload is yours to do; the right to emit a source you do not own stay
 `VPCBinding.allowForwarding`, authored by whoever holds `export` on the VPC.
 Receiving is not sending, and a firewall needs both.
 
-## 6. Why not the `NetworkAttachment` CRD
+## 7. Why not the `NetworkAttachment` CRD
 
 `design.md` §9 and `control-plane.md` §2 both name a `NetworkAttachment` object as
 the Multus replacement. It was never built, and `control-plane.md` already says to

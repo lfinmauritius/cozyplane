@@ -133,6 +133,13 @@ Two tiers: **declarative** (authored by tenants/operators, desired state) and
 > the grant that lets one of them forward is a field on `VPCBinding` — the object
 > that already carries the `export`-gated grant. A template CRD can be layered on
 > later without changing the CNI. See [multi-attach.md](multi-attach.md).
+>
+> The one real `net-attach-def` in the system is unrelated to that shape: cozyplane
+> generates a shim `NetworkAttachmentDefinition` per `VPCBinding` so a **KubeVirt
+> VM** can name a VPC at all — `spec.networks` admits only `pod` and `multus`, so
+> Multus is the only vocabulary a VM's secondary NIC has. The shim carries no
+> addressing, policy or identity. See
+> [kubevirt-multi-nic.md](kubevirt-multi-nic.md).
 
 ### Declarative
 

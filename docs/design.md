@@ -311,6 +311,22 @@ interface from it is the right to impersonate any member of that VPC, so it is a
 grant on `VPCBinding`, authored by the VPC's owner. See
 [multi-attach.md](multi-attach.md).
 
+**Scope of the claim: pods.** A pod needs no meta-CNI to reach several VPCs, and
+that is what this section has always been about. It does not extend to a **KubeVirt
+VM**, for a reason outside cozyplane: a guest only sees NICs KubeVirt put in its
+domain, KubeVirt only declares NICs named in `spec.networks`, and that field admits
+exactly `pod: {}` and `multus: {}`. Multus is not one way to give a VM a second NIC
+— it is the only way. An interface cozyplane adds to a `virt-launcher` pod without
+a matching `networks` entry is simply unused.
+
+So cozyplane also answers when Multus calls it, and generates a shim
+`NetworkAttachmentDefinition` per `VPCBinding` — where attachment is already
+authorized, so no new authorization surface. The shim carries no addressing, policy
+or identity; those stay in cozyplane's own objects. It is an **adapter** to the one
+vocabulary the consumer has, not a return to `net-attach-def` chaining, and the
+annotation path above is unchanged. See
+[kubevirt-multi-nic.md](kubevirt-multi-nic.md).
+
 ## 10. Controlled doors: Services, DNS, metadata, egress
 
 The VPC gateway address is the single, policy-controlled door between a tenant
