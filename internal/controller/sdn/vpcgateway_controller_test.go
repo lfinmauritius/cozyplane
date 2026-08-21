@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -280,5 +281,62 @@ func TestGatewayNATDisabledOwnsNoService(t *testing.T) {
 	reconcileGateway(t, c, "team-a", "door")
 	if len(allNATServices(t, c, "team-a", "door")) != 0 {
 		t.Error("a NAT-disabled gateway must own no NAT Service")
+	}
+}
+
+// Conditions must carry the fields metav1.Condition requires. A bare append
+// left LastTransitionTime zero: kubectl renders a blank transition time, an
+// age computation is wrong, and the object would be rejected outright if the
+// kind ever went back to CRD-served — where lastTransitionTime is required.
+func TestGatewayConditionsAreWellFormed(t *testing.T) {
+	c := gwClient(t,
+		vpcWithCIDRs("team-a", "vpc-a", 100, "10.10.0.0/24"),
+		natGateway("team-a", "door", "vpc-a"))
+	gw := reconcileGateway(t, c, "team-a", "door")
+
+	if len(gw.Status.Conditions) == 0 {
+		t.Fatal("gateway reported no conditions")
+	}
+	seen := map[string]int{}
+	for _, cond := range gw.Status.Conditions {
+		seen[cond.Type]++
+		if cond.LastTransitionTime.IsZero() {
+			t.Errorf("condition %q has no LastTransitionTime", cond.Type)
+		}
+		if cond.Reason == "" {
+			t.Errorf("condition %q has no Reason", cond.Type)
+		}
+	}
+	for typ, n := range seen {
+		if n > 1 {
+			t.Errorf("condition %q appears %d times; conditions are a map by type", typ, n)
+		}
+	}
+	for _, want := range []string{
+		sdnv1alpha1.VPCGatewayConditionVPCResolved,
+		sdnv1alpha1.VPCGatewayConditionExclusive,
+		sdnv1alpha1.VPCGatewayConditionNATReady,
+	} {
+		if meta.FindStatusCondition(gw.Status.Conditions, want) == nil {
+			t.Errorf("condition %q is missing", want)
+		}
+	}
+}
+
+// A settled gateway must stop writing status, or every reconcile is an API
+// write and the controller never converges. This is what gwStatusEqual is for,
+// and it must keep holding now that the ordering belongs to
+// meta.SetStatusCondition rather than to the call order.
+func TestGatewayStatusConvergesAcrossReconciles(t *testing.T) {
+	c := gwClient(t,
+		vpcWithCIDRs("team-a", "vpc-a", 100, "10.10.0.0/24"),
+		natGateway("team-a", "door", "vpc-a"))
+	reconcileGateway(t, c, "team-a", "door")
+	first := reconcileGateway(t, c, "team-a", "door")
+	second := reconcileGateway(t, c, "team-a", "door")
+
+	if first.ResourceVersion != second.ResourceVersion {
+		t.Errorf("status rewritten on a no-op reconcile: %s -> %s",
+			first.ResourceVersion, second.ResourceVersion)
 	}
 }
