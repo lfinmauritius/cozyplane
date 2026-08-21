@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -142,16 +143,34 @@ func fabricByPodUID(factory localinformers.SharedInformerFactory, podUID string)
 
 // nodeIPIndex tracks node name -> underlay (Geneve) address, so a FabricIP can
 // be resolved to a tunnel endpoint without a second API read.
+//
+// It is written by the Node informer and read from three other goroutines —
+// the FabricIP informer (watchFabricIPs' nodeIPOf), the sdn informers
+// (watchVPCGateways' shard table) and run() itself — each backed by a
+// different SharedInformerFactory, so nothing serializes them. An unguarded
+// map here is not a stale read: concurrent read+write is a runtime FATAL
+// error, which takes the node's whole datapath manager down with it. Hence the
+// mutex, matching nodePoolIndex.
 type nodeIPIndex struct {
+	mu     sync.Mutex
 	byName map[string]net.IP
 }
 
 func newNodeIPIndex() *nodeIPIndex { return &nodeIPIndex{byName: map[string]net.IP{}} }
 
 func (n *nodeIPIndex) set(node *corev1.Node) {
-	if ip := internalIP(node); ip != "" {
-		n.byName[node.Name] = net.ParseIP(ip)
+	ip := internalIP(node)
+	if ip == "" {
+		return
 	}
+	addr := net.ParseIP(ip)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.byName[node.Name] = addr
 }
 
-func (n *nodeIPIndex) get(name string) net.IP { return n.byName[name] }
+func (n *nodeIPIndex) get(name string) net.IP {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.byName[name]
+}
