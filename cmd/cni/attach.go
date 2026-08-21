@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 )
 
 // Multi-attach: several VPCs on one pod (docs/multi-attach.md).
@@ -36,6 +37,11 @@ import (
 // and the alternative — a shorter container-ID slice — trades a real property
 // (names that stay distinct across concurrent sandboxes) for a hypothetical one.
 const maxAttachments = 10
+
+// maxDelegates bounds Multus-delegated NICs by that same one character, which for
+// them holds a letter: net0..net25. KubeVirt numbers a VM's secondary NICs from
+// net1 in spec.networks order, so this is 25 secondary NICs on one VM.
+const maxDelegates = 25
 
 // hostVethPrefix is the host-side veth prefix. It must stay in step with
 // datapath's podVethPrefix (unexported there), which the agent's rebuild scan and
@@ -59,11 +65,36 @@ type attachment struct {
 	MAC net.HardwareAddr
 	// IfName is the interface name inside the pod (defaults to eth<Index>).
 	IfName string
+	// Delegated marks an attachment realized because MULTUS called us, one
+	// invocation per NetworkAttachmentDefinition, rather than because the pod's
+	// annotation asked for it. A delegated attachment is never the primary: the
+	// primary is the pod network, and a VM has exactly one
+	// (docs/kubevirt-multi-nic.md).
+	Delegated bool
 }
 
 // Primary reports whether this attachment owns the pod's fabric handle, its
 // default route and its status.podIP.
-func (a attachment) Primary() bool { return a.Index == 0 }
+//
+// A delegated attachment never is, whatever its index: Multus invokes the
+// delegate once per secondary NIC, and the pod's one fabric handle belongs to
+// the pod network that KubeVirt attached first.
+func (a attachment) Primary() bool { return !a.Delegated && a.Index == 0 }
+
+// NICID identifies this attachment among a VM's NICs, for the persistent Port
+// that pins its {VPC IP, MAC} across a migration (LabelVMNIC).
+//
+// The two attachment paths use disjoint value spaces on purpose. The annotation
+// path numbers its entries; a delegated NIC uses its Multus interface name,
+// which is unique within the pod by construction. A decimal index and a name
+// beginning "net" can never be equal, so the two paths cannot select each
+// other's Port even for two NICs of one VM on one VPC.
+func (a attachment) NICID() string {
+	if a.Delegated {
+		return a.IfName
+	}
+	return strconv.Itoa(a.Index)
+}
 
 // netEntry is the wire form of one entry in the networks annotation.
 type netEntry struct {
@@ -113,10 +144,25 @@ func parseAttachments(vpcAnno, networksAnno, podNS string) ([]attachment, error)
 		if e.VPC == "" {
 			return nil, fmt.Errorf("%s entry %d has no vpc", networksAnnotation, i)
 		}
+		// A netN entry describes a MULTUS-delegated NIC (docs/kubevirt-multi-nic.md).
+		// It is not a leg this invocation builds — Multus calls us separately for
+		// it — it is only where that NIC's ip/mac are pinned. Skip it here, but
+		// still take its name so a duplicate is caught.
+		if isDelegatedIfName(e.Name) {
+			if seenName[e.Name] {
+				return nil, fmt.Errorf("%s: interface name %q requested twice", networksAnnotation, e.Name)
+			}
+			seenName[e.Name] = true
+			continue
+		}
+		// Indices run over the SURVIVING entries, not over the raw list: index 0
+		// must exist and must be the attachment carrying the fabric handle, so a
+		// delegated entry appearing first cannot shift it away.
+		idx := len(out)
 		ns, name := parseVPCRef(e.VPC, podNS)
-		a := attachment{Index: i, VPCNamespace: ns, VPCName: name, IfName: e.Name}
+		a := attachment{Index: idx, VPCNamespace: ns, VPCName: name, IfName: e.Name}
 		if a.IfName == "" {
-			a.IfName = defaultIfName(i)
+			a.IfName = defaultIfName(idx)
 		}
 		// Two entries on one interface name is not a preference to resolve: the
 		// second would silently replace the first inside the pod.
@@ -148,7 +194,101 @@ func parseAttachments(vpcAnno, networksAnno, podNS string) ([]attachment, error)
 		}
 		out = append(out, a)
 	}
+	// Every entry may have been a delegated pin, leaving nothing to build. That is
+	// a legitimate shape — management on the default network, transit legs on VPCs
+	// through NADs — and the caller falls through to the default network.
 	return out, nil
+}
+
+// isDelegatedIfName reports whether an interface name belongs to Multus rather
+// than to the annotation path. net[0-9]+ is what Multus assigns and what KubeVirt
+// requests, in spec.networks order, for a VM's secondary NICs; the name space is
+// reserved so the two paths cannot claim the same interface
+// (docs/kubevirt-multi-nic.md).
+func isDelegatedIfName(name string) bool {
+	if !strings.HasPrefix(name, "net") || len(name) == len("net") {
+		return false
+	}
+	for _, c := range name[len("net"):] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// delegateIndex extracts N from netN.
+func delegateIndex(ifName string) (int, error) {
+	if !isDelegatedIfName(ifName) {
+		return 0, fmt.Errorf("delegated interface name %q is not net<N>: cozyplane's delegate mode "+
+			"needs the naming Multus and KubeVirt assign by default", ifName)
+	}
+	n, err := strconv.Atoi(ifName[len("net"):])
+	if err != nil {
+		return 0, fmt.Errorf("delegated interface name %q: %w", ifName, err)
+	}
+	return n, nil
+}
+
+// delegateAttachment builds the single attachment of a Multus-delegated
+// invocation: the VPC comes from the NAD (the plugin config), the interface name
+// from Multus, and ip/mac — if pinned at all — from the pod's networks annotation
+// entry naming this interface.
+//
+// It is never primary. A disagreement between the NAD's VPC and the annotation
+// entry's is a hard error: two sources naming different networks for one NIC is
+// not a precedence to resolve.
+func delegateAttachment(confVPC, ifName, networksAnno, podNS string) (attachment, error) {
+	if confVPC == "" {
+		return attachment{}, fmt.Errorf("delegate mode needs a vpc in the plugin config")
+	}
+	idx, err := delegateIndex(ifName)
+	if err != nil {
+		return attachment{}, err
+	}
+	ns, name := parseVPCRef(confVPC, podNS)
+	a := attachment{Index: idx, VPCNamespace: ns, VPCName: name, IfName: ifName, Delegated: true}
+
+	if networksAnno == "" {
+		return a, nil
+	}
+	var entries []netEntry
+	if err := json.Unmarshal([]byte(networksAnno), &entries); err != nil {
+		return attachment{}, fmt.Errorf("%s is not a JSON list of network entries: %w", networksAnnotation, err)
+	}
+	for i, e := range entries {
+		if e.Name != ifName {
+			continue
+		}
+		if e.VPC != "" {
+			ens, ename := parseVPCRef(e.VPC, podNS)
+			if ens != ns || ename != name {
+				return attachment{}, fmt.Errorf(
+					"%s entry %d pins %s to vpc %s/%s but the NetworkAttachmentDefinition names %s/%s",
+					networksAnnotation, i, ifName, ens, ename, ns, name)
+			}
+		}
+		if e.IP != "" {
+			ip := net.ParseIP(e.IP)
+			if ip == nil || ip.String() != e.IP {
+				return attachment{}, fmt.Errorf("%s entry %d: ip %q is not an IP address in canonical form",
+					networksAnnotation, i, e.IP)
+			}
+			a.IP = ip
+		}
+		if e.MAC != "" {
+			mac, err := net.ParseMAC(e.MAC)
+			if err != nil {
+				return attachment{}, fmt.Errorf("%s entry %d: mac %q: %w", networksAnnotation, i, e.MAC, err)
+			}
+			if len(mac) != 6 {
+				return attachment{}, fmt.Errorf("%s entry %d: mac %q is not a 6-byte address", networksAnnotation, i, e.MAC)
+			}
+			a.MAC = mac
+		}
+		break
+	}
+	return a, nil
 }
 
 // defaultIfName is eth0, eth1, … — the names a guest expects to find.
@@ -165,6 +305,33 @@ func defaultIfName(index int) string {
 // pods created before multi-attach existed have host veths under the old name and
 // a DEL that reconstructs a different one would leave their map entries and links
 // behind. Only the additional interfaces take the indexed form.
+// hostVethNameForDelegate names the host side of a MULTUS-delegated attachment.
+//
+// A LETTER where hostVethNameForIndex puts a digit, which is the whole point. The
+// two paths delete independently — Multus calls the delegate's DEL separately from
+// the primary's — and the primary's DEL finds its links by RECONSTRUCTING every
+// name in its space rather than by consulting state. A shared space would let a
+// primary DEL name, and destroy, a delegated interface. Disjoint spaces make that
+// impossible by construction instead of by care.
+//
+// Same 14 characters as the indexed form and the same "cph" prefix, so datapath's
+// rebuild scan and the masquerade RETURN rule keep matching.
+func hostVethNameForDelegate(containerID, ifName string) (string, error) {
+	n, err := delegateIndex(ifName)
+	if err != nil {
+		return "", err
+	}
+	if n > maxDelegates {
+		return "", fmt.Errorf("delegated interface %q exceeds the %d supported per pod (host interface names)",
+			ifName, maxDelegates)
+	}
+	id := containerID
+	if len(id) > 10 {
+		id = id[:10]
+	}
+	return hostVethPrefix + string(rune('a'+n)) + id, nil
+}
+
 func hostVethNameForIndex(containerID string, index int) string {
 	if index == 0 {
 		return hostVethNameFor(containerID)

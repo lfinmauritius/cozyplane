@@ -77,6 +77,7 @@ const (
 	labelPodUID        = sdnv1alpha1.LabelPodUID
 	labelVMName        = sdnv1alpha1.LabelVMName
 	labelVMNIC         = sdnv1alpha1.LabelVMNIC
+	labelIfName        = sdnv1alpha1.LabelIfName
 )
 
 // linkLocalGW is the on-link next hop installed in every pod, answered by the
@@ -119,6 +120,16 @@ func podGateway(ip net.IP) net.IP {
 type NetConf struct {
 	types.NetConf
 	MTU int `json:"mtu,omitempty"`
+
+	// VPC, when set, means this invocation is a MULTUS DELEGATE: the value comes
+	// from a NetworkAttachmentDefinition naming one VPC ("[<owner-ns>/]<name>"),
+	// and cozyplane must realize exactly that one attachment on CNI_IFNAME rather
+	// than reading the pod's annotation list (docs/kubevirt-multi-nic.md).
+	//
+	// The cluster conflist the agent writes never carries it, so the primary
+	// invocation is unaffected. It is not a grant either — the VPCBinding in the
+	// pod's namespace still decides whether the attachment is permitted.
+	VPC string `json:"vpc,omitempty"`
 }
 
 // k8sArgs are the Kubernetes-specific CNI_ARGS passed by kubelet.
@@ -234,6 +245,16 @@ func cmdAdd(args *skel.CmdArgs) error {
 				}
 			}
 		}
+	}
+
+	// A Multus delegate realizes ONE named VPC on CNI_IFNAME. It must not fall
+	// into the annotation path, which derives its own interface names and builds
+	// the whole list (docs/kubevirt-multi-nic.md).
+	if conf.VPC != "" {
+		if gwAnno != "" {
+			return fmt.Errorf("%s and a delegated vpc are mutually exclusive: a gateway pod lives on the default network", gatewayAnnotation)
+		}
+		return addDelegate(ctx, args, conf, networksAnno, podNS, podName, podUID, vmName, podLabels)
 	}
 
 	atts, err := parseAttachments(vpcAnno, networksAnno, podNS)
@@ -812,8 +833,8 @@ func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAt
 	ipnet := r.cidr
 
 	if vmName != "" {
-		sel := fmt.Sprintf("%s=%s,%s=%s,%s=%s,%s=%d", labelVPCNamespace, vpcNS, labelVPC, vpc.Name,
-			labelVMName, vmName, labelVMNIC, r.Index)
+		sel := fmt.Sprintf("%s=%s,%s=%s,%s=%s,%s=%s", labelVPCNamespace, vpcNS, labelVPC, vpc.Name,
+			labelVMName, vmName, labelVMNIC, r.NICID())
 		existing, err := client.SdnV1alpha1().Ports().List(ctx, metav1.ListOptions{LabelSelector: sel})
 		if err != nil {
 			return nil, nil, nil, false, fmt.Errorf("list persistent ports for vm %q: %w", vmName, err)
@@ -881,7 +902,13 @@ func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAt
 		}
 		if vmName != "" {
 			labels[labelVMName] = vmName
-			labels[labelVMNIC] = strconv.Itoa(r.Index)
+			labels[labelVMNIC] = r.NICID()
+		}
+		// Only delegated Ports carry it, and only they need it: the annotation
+		// path's DEL releases every Port of the pod at once, while a delegated DEL
+		// must find exactly its own.
+		if r.Delegated {
+			labels[labelIfName] = r.IfName
 		}
 		var annotations map[string]string
 		if podLabels != "" {
@@ -1071,7 +1098,7 @@ func addPodAddrRoute(link netlink.Link, podIP net.IP, primary bool, vpcCIDR *net
 		// Ensure v6 is on inside the pod netns, and skip DAD on the /128: it is a
 		// point-to-point veth with no possible duplicate, and DAD would leave the
 		// address "tentative" (unusable) for ~1s, racing the pod's first packet.
-		_ = datapath.WriteProcSys(fmt.Sprintf("net/ipv6/conf/%s/disable_ipv6", contVethName), "0")
+		_ = datapath.WriteProcSys(fmt.Sprintf("net/ipv6/conf/%s/disable_ipv6", link.Attrs().Name), "0")
 		addr.Flags = unix.IFA_F_NODAD
 	}
 	if err := netlink.AddrAdd(link, addr); err != nil && !isExist(err) {
@@ -1216,6 +1243,18 @@ func configureHostVeth(name string, podIPs []net.IP, netID uint32, podMAC net.Ha
 func cmdDel(args *skel.CmdArgs) error {
 	ctx, cancel := operationContext()
 	defer cancel()
+
+	conf, err := loadConf(args.StdinData)
+	if err != nil {
+		return err
+	}
+	// A delegated DEL removes only its own interface and Port. Falling through
+	// would enumerate the whole primary name space and release the pod's FabricIP
+	// claims — tearing down eth0 and the pod's underlay identity along with one
+	// secondary NIC.
+	if conf.VPC != "" {
+		return delDelegate(ctx, args, conf)
+	}
 
 	// Clear the ports map entries; the host veths (and their tc filters) go
 	// with the pod veths deleted below. Capture the VPC veth's net id first so the
