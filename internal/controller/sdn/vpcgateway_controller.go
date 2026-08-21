@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -401,12 +402,18 @@ func (r *VPCGatewayReconciler) deleteNATFamilyService(ctx context.Context, gw *s
 	return nil
 }
 
+// setGWCondition goes through meta.SetStatusCondition rather than appending, as
+// its FloatingIP twin already did. A bare append left LastTransitionTime unset —
+// a field metav1.Condition marks required, so kubectl shows a blank transition
+// time, anything computing a condition's age is wrong, and the object would fail
+// schema validation outright if this kind ever went back to being CRD-served. It
+// also meant two calls with the same Type silently produced two entries.
 func setGWCondition(status *sdnv1alpha1.VPCGatewayStatus, condType string, ok bool, reason, msg string) {
 	st := metav1.ConditionFalse
 	if ok {
 		st = metav1.ConditionTrue
 	}
-	status.Conditions = append(status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    condType,
 		Status:  st,
 		Reason:  reason,
@@ -419,11 +426,13 @@ func gwStatusEqual(a, b sdnv1alpha1.VPCGatewayStatus) bool {
 		len(a.Conditions) != len(b.Conditions) {
 		return false
 	}
-	for i := range a.Conditions {
-		if a.Conditions[i].Type != b.Conditions[i].Type ||
-			a.Conditions[i].Status != b.Conditions[i].Status ||
-			a.Conditions[i].Reason != b.Conditions[i].Reason ||
-			a.Conditions[i].Message != b.Conditions[i].Message {
+	// By type, not by index: meta.SetStatusCondition owns the ordering now, and
+	// a comparison that depends on it would report a spurious difference (and so
+	// write status forever) the day a condition is added or reordered. The
+	// timestamps are deliberately not compared — they change on every rebuild.
+	for _, ca := range a.Conditions {
+		cb := meta.FindStatusCondition(b.Conditions, ca.Type)
+		if cb == nil || cb.Status != ca.Status || cb.Reason != ca.Reason || cb.Message != ca.Message {
 			return false
 		}
 	}
