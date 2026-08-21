@@ -200,14 +200,6 @@ func launcherOnNode(pods []corev1.Pod, node string) *corev1.Pod {
 	return nil
 }
 
-// vmiActiveNode reads the VM's current node from the VMI: status.nodeName (the
-// node the active virt-launcher runs on, flipped to the target at cutover). ok
-// is false when the VMI is absent or has no node yet, so the caller falls back.
-func (r *PersistentPortReconciler) vmiActiveNode(ctx context.Context, namespace, vmName string) (string, bool) {
-	node, _, _, ok := r.vmiCutoverState(ctx, namespace, vmName)
-	return node, ok
-}
-
 // vmiCutoverState reads the VMI's cutover signals: the active node
 // (status.nodeName), the in-flight migration's target node, and whether that
 // migration failed. ok is false when the VMI is absent or has no node yet.
