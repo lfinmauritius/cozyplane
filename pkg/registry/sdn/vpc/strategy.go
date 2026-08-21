@@ -19,6 +19,8 @@ package vpc
 import (
 	"context"
 	"errors"
+	"net"
+	"slices"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
 	"k8s.io/apimachinery/pkg/fields"
@@ -84,7 +86,50 @@ func (vpcStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object
 }
 
 func (vpcStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	return validateVPCSpec(obj.(*sdn.VPC))
+}
+
+// validateVPCSpec rejects a VPC that cannot become a working network.
+//
+// This is the group's ONLY validation layer: the tenant kinds are served by the
+// aggregated apiserver, which — unlike a CRD — applies no structural schema. An
+// empty Validate here meant a VPC with no CIDR, or with "not-a-cidr", was stored
+// happily; the controller then assigned it a VNI and marked it Ready (it never
+// looks at the CIDRs), the agents skipped it silently, and the tenant only found
+// out when every pod died in ContainerCreating with "vpc has no CIDR". A VPC that
+// reports Ready and cannot host a pod is the worst answer we can give, so refuse
+// the object instead.
+func validateVPCSpec(vpc *sdn.VPC) field.ErrorList {
+	var errs field.ErrorList
+	cidrsPath := field.NewPath("spec", "cidrs")
+
+	if len(vpc.Spec.CIDRs) == 0 {
+		errs = append(errs, field.Required(cidrsPath,
+			"a VPC needs at least one CIDR; pods cannot attach to a VPC with no address space"))
+	}
+	for i, c := range vpc.Spec.CIDRs {
+		p := cidrsPath.Index(i)
+		ip, ipnet, err := net.ParseCIDR(c)
+		if err != nil {
+			errs = append(errs, field.Invalid(p, c, "not a valid CIDR"))
+			continue
+		}
+		// Canonical (masked) form, like the Port and ServiceVIP name claims:
+		// "10.0.0.5/24" means 10.0.0.0/24 to every consumer of this field, and a
+		// tenant reading its own spec back should not have to know that.
+		if !ip.Equal(ipnet.IP) || ipnet.String() != c {
+			errs = append(errs, field.Invalid(p, c,
+				"must be in canonical form (the network address and prefix, e.g. "+ipnet.String()+")"))
+		}
+	}
+
+	// The MTU is handed to the CNI verbatim; a nonsensical one produces a pod
+	// interface nothing can talk through. Zero means "take the default".
+	if m := vpc.Spec.MTU; m != 0 && (m < 576 || m > 65535) {
+		errs = append(errs, field.Invalid(field.NewPath("spec", "mtu"), m,
+			"must be 0 (the controller default) or between 576 and 65535"))
+	}
+	return errs
 }
 
 // WarningsOnCreate returns warnings for the creation of the given object.
@@ -103,8 +148,16 @@ func (vpcStrategy) AllowUnconditionalUpdate() bool {
 func (vpcStrategy) Canonicalize(obj runtime.Object) {
 }
 
+// ValidateUpdate ratchets: the spec is re-validated only where it CHANGED, so a
+// VPC stored before this validation existed can still be edited (and repaired)
+// rather than being frozen by a rule it predates.
 func (vpcStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	newVPC := obj.(*sdn.VPC)
+	oldVPC := old.(*sdn.VPC)
+	if slices.Equal(newVPC.Spec.CIDRs, oldVPC.Spec.CIDRs) && newVPC.Spec.MTU == oldVPC.Spec.MTU {
+		return field.ErrorList{}
+	}
+	return validateVPCSpec(newVPC)
 }
 
 // WarningsOnUpdate returns warnings for the given update.

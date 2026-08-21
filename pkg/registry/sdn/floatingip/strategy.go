@@ -19,6 +19,7 @@ package floatingip
 import (
 	"context"
 	"errors"
+	"net"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
 	"k8s.io/apimachinery/pkg/fields"
@@ -84,7 +85,36 @@ func (floatingIPStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime
 }
 
 func (floatingIPStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	return validateFloatingIPSpec(obj.(*sdn.FloatingIP))
+}
+
+// validateFloatingIPSpec rejects a binding that can never resolve.
+//
+// Like the VPC strategy, this is the only validation layer the aggregated
+// apiserver gives these kinds. Unvalidated, a FloatingIP whose target was not an
+// address at all was accepted and then failed SILENTLY: the controller's
+// ensureEndpointSlice parses the target, and on a parse error returns nil and
+// writes no endpoint, so the object sat Pending forever with nothing anywhere
+// saying why. The target is also matched against Port.spec.IP, which the Port
+// strategy already pins to canonical form — so a non-canonical target here could
+// never match a Port even when it named a real address.
+func validateFloatingIPSpec(fip *sdn.FloatingIP) field.ErrorList {
+	var errs field.ErrorList
+	specPath := field.NewPath("spec")
+
+	if fip.Spec.VPCRef.Name == "" {
+		errs = append(errs, field.Required(specPath.Child("vpcRef", "name"),
+			"the local VPC name is required"))
+	}
+	switch ip := net.ParseIP(fip.Spec.Target); {
+	case fip.Spec.Target == "":
+		errs = append(errs, field.Required(specPath.Child("target"),
+			"the tenant IP this address binds to is required"))
+	case ip == nil || ip.String() != fip.Spec.Target:
+		errs = append(errs, field.Invalid(specPath.Child("target"), fip.Spec.Target,
+			"must be an IP address in canonical form: it is matched against a Port's spec.ip"))
+	}
+	return errs
 }
 
 // WarningsOnCreate returns warnings for the creation of the given object.
@@ -103,8 +133,15 @@ func (floatingIPStrategy) AllowUnconditionalUpdate() bool {
 func (floatingIPStrategy) Canonicalize(obj runtime.Object) {
 }
 
+// ValidateUpdate ratchets on the validated fields (see the VPC strategy): an
+// object stored before this validation existed stays editable.
 func (floatingIPStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	newFIP := obj.(*sdn.FloatingIP)
+	oldFIP := old.(*sdn.FloatingIP)
+	if newFIP.Spec.Target == oldFIP.Spec.Target && newFIP.Spec.VPCRef == oldFIP.Spec.VPCRef {
+		return field.ErrorList{}
+	}
+	return validateFloatingIPSpec(newFIP)
 }
 
 // WarningsOnUpdate returns warnings for the given update.
