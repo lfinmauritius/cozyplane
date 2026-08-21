@@ -55,6 +55,7 @@ func localClient() (localclientset.Interface, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg.Timeout = apiRequestTimeout
 	return localclientset.NewForConfig(cfg)
 }
 
@@ -95,15 +96,17 @@ func poolOfFamily(pools []string, wantV6 bool) []string {
 // It walks candidates and lets Create decide: AlreadyExists means someone else
 // holds it, so try the next. Nothing is reserved that is not created, so a
 // crashed plugin leaks nothing.
-func claimFabricIPs(client localclientset.Interface, cidrs []string, node, podNS, podName, podUID string) ([]net.IP, error) {
+func claimFabricIPs(ctx context.Context, client localclientset.Interface, cidrs []string, node, podNS, podName, podUID string) ([]net.IP, error) {
 	var claimed []net.IP
 	for _, cidr := range cidrs {
-		ip, err := claimOne(client, cidr, node, podNS, podName, podUID)
+		ip, err := claimOne(ctx, client, cidr, node, podNS, podName, podUID)
 		if err != nil {
 			// Roll back whatever we already took for this pod: a half-addressed
 			// pod is worse than a failed ADD, and the addresses would leak
 			// until the controller's GC noticed.
-			releaseFabricIPs(client, podUID)
+			cctx, ccancel := cleanupContext(ctx)
+			releaseFabricIPs(cctx, client, podUID)
+			ccancel()
 			return nil, err
 		}
 		claimed = append(claimed, ip)
@@ -114,7 +117,7 @@ func claimFabricIPs(client localclientset.Interface, cidrs []string, node, podNS
 	return claimed, nil
 }
 
-func claimOne(client localclientset.Interface, cidr, node, podNS, podName, podUID string) (net.IP, error) {
+func claimOne(ctx context.Context, client localclientset.Interface, cidr, node, podNS, podName, podUID string) (net.IP, error) {
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return nil, fmt.Errorf("parse pod CIDR %q: %w", cidr, err)
@@ -172,7 +175,7 @@ func claimOne(client localclientset.Interface, cidr, node, podNS, podName, podUI
 				PodUID:       podUID,
 			},
 		}
-		_, err := client.LocalV1alpha1().FabricIPs().Create(context.TODO(), fip, metav1.CreateOptions{})
+		_, err := client.LocalV1alpha1().FabricIPs().Create(ctx, fip, metav1.CreateOptions{})
 		if err == nil {
 			return candidate, nil
 		}
@@ -211,11 +214,11 @@ func addOffset(base net.IP, n uint64) net.IP {
 // design: if it fails (or never runs, because the node died), the controller's
 // GC reaps the object once the pod is gone — which is the entire point of the
 // address being an object rather than a line in a file.
-func releaseFabricIPs(client localclientset.Interface, podUID string) {
+func releaseFabricIPs(ctx context.Context, client localclientset.Interface, podUID string) {
 	if podUID == "" {
 		return
 	}
-	_ = client.LocalV1alpha1().FabricIPs().DeleteCollection(context.TODO(),
+	_ = client.LocalV1alpha1().FabricIPs().DeleteCollection(ctx,
 		metav1.DeleteOptions{},
 		metav1.ListOptions{LabelSelector: labelFabricPodUID + "=" + podUID})
 }
