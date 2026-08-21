@@ -456,7 +456,7 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 		// egress gateway, and which is exactly the semantics a router needs.
 		netID := uint32(r.vpc.Status.VNI)
 		if r.forwarding {
-			netID |= datapath.PortGatewayFlag
+			netID |= datapath.PortForwardFlag
 		}
 		hostVeth := hostVethNameForIndex(args.ContainerID, r.Index)
 		podMAC, e := setupAttachment(args, r, hostVeth, vpcIP, podMACPinned, mtu, netID)
