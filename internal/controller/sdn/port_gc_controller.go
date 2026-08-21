@@ -26,9 +26,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
 )
@@ -146,15 +149,40 @@ func (r *PortGCReconciler) reapIfAbandoned(ctx context.Context, port *sdnv1alpha
 	return ctrl.Result{}, nil
 }
 
+// deletionsOnly admits only Delete events.
+//
+// Both auxiliary watches below exist for exactly one signal — an object going
+// away — but without a predicate they fired on Add and Update too, and a Node
+// Update is a heartbeat: every node posts one every few seconds. Each of those
+// ran mapNodeToPorts, which lists EVERY Port in the cluster and filters in Go.
+// On a hundred nodes that was a full Port list several times a second, and a
+// re-enqueue of every Port each time, for events that can never change the
+// answer. Nothing was wrong with the verdict; it was just being recomputed for
+// no reason, forever.
+//
+// Delete-only is safe for the startup case too: a pod or node that vanished
+// while the controller was down produces no Delete event on restart, but the
+// For(&Port{}) informer's initial sync enqueues every Port anyway, so the sweep
+// still happens.
+var deletionsOnly = predicate.Funcs{
+	CreateFunc:  func(event.CreateEvent) bool { return false },
+	UpdateFunc:  func(event.UpdateEvent) bool { return false },
+	GenericFunc: func(event.GenericEvent) bool { return false },
+	DeleteFunc:  func(event.DeleteEvent) bool { return true },
+}
+
 // SetupWithManager registers the reconciler: Port events drive it, a deleted
 // Node re-enqueues that node's Ports (they may already be terminating, with no
 // further Port event coming), and a deleted Pod re-enqueues the Ports it
-// claims (an abandoned Port gets no further Port event either).
+// claims (an abandoned Port gets no further Port event either). Both auxiliary
+// watches are delete-scoped — see deletionsOnly.
 func (r *PortGCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sdnv1alpha1.Port{}).
-		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapNodeToPorts)).
-		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToPorts)).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapNodeToPorts),
+			builder.WithPredicates(deletionsOnly)).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToPorts),
+			builder.WithPredicates(deletionsOnly)).
 		Named("portgc").
 		Complete(r)
 }
