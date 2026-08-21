@@ -91,6 +91,14 @@ type VPCGatewaySpec struct {
 	LoadBalancerClass string
 	NAT               VPCGatewayNAT
 	Ingress           VPCGatewayIngress
+
+	// Appliance names a tenant workload that IS this VPC's door — a firewall or
+	// router attached to several VPCs. Off-VPC traffic is delivered to
+	// gateways[vni] with its destination intact, so whatever holds that entry
+	// receives the VPC's egress and may route it on. Being the door is about
+	// RECEIVING; the right to emit a source you do not own is the separate,
+	// export-gated VPCBinding.AllowForwarding (docs/multi-attach.md).
+	Appliance *VPCGatewayAppliance
 }
 
 // VPCGatewayStatus is the observed state of a VPCGateway.
@@ -101,6 +109,16 @@ type VPCGatewayStatus struct {
 	NATAddress6 string
 	Phase       VPCGatewayPhase
 	Conditions  []metav1.Condition
+
+	// AppliancePort is the Port currently serving as the VPC's door when
+	// Appliance is set (the cluster-scoped Port name).
+	AppliancePort string
+}
+
+// VPCGatewayAppliance selects the tenant workload that serves as the VPC's door.
+type VPCGatewayAppliance struct {
+	PodSelector metav1.LabelSelector
+	Namespace   string
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
