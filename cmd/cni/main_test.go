@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"net"
 	"slices"
 	"testing"
@@ -24,8 +25,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
+	localv1alpha1 "github.com/lllamnyp/cozyplane/api/localsdn/v1alpha1"
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
 	"github.com/lllamnyp/cozyplane/datapath"
+	localfake "github.com/lllamnyp/cozyplane/pkg/generated/localsdn/clientset/versioned/fake"
 	sdnfake "github.com/lllamnyp/cozyplane/pkg/generated/sdn/clientset/versioned/fake"
 )
 
@@ -166,7 +169,7 @@ func TestClaimIP_FirstAddressAndPortShape(t *testing.T) {
 	vpc := newVPC("team-a", "tenant-a", 100, "10.10.0.0/24")
 	state := &datapath.AgentState{NodeName: "node1", NodeIP: "192.0.2.1"}
 
-	ip, _, port, _, err := attachPort(client, vpc, "team-a", state, "10.244.0.5", "team-a", "app-1", "uid-1", "", "")
+	ip, _, port, _, err := attachPort(t.Context(), client, vpc, "team-a", state, "10.244.0.5", "team-a", "app-1", "uid-1", "", "")
 	if err != nil {
 		t.Fatalf("claimIP: %v", err)
 	}
@@ -211,7 +214,7 @@ func TestClaimIP_IPv6(t *testing.T) {
 	vpc := newVPC("team-a", "tenant6", 200, "fd00:a::/64")
 	state := &datapath.AgentState{NodeName: "node1", NodeIP: "192.0.2.1"}
 
-	ip, _, port, _, err := attachPort(client, vpc, "team-a", state, "10.244.0.5", "team-a", "app6", "uid-6", "", "")
+	ip, _, port, _, err := attachPort(t.Context(), client, vpc, "team-a", state, "10.244.0.5", "team-a", "app6", "uid-6", "", "")
 	if err != nil {
 		t.Fatalf("claimIP v6: %v", err)
 	}
@@ -232,10 +235,10 @@ func TestClaimIP_SkipsUsedAddresses(t *testing.T) {
 	vpc := newVPC("team-a", "tenant-a", 100, "10.10.0.0/24")
 	state := &datapath.AgentState{NodeName: "node1", NodeIP: "192.0.2.1"}
 
-	if _, _, _, _, err := attachPort(client, vpc, "team-a", state, "10.244.0.5", "team-a", "app-1", "uid-1", "", ""); err != nil {
+	if _, _, _, _, err := attachPort(t.Context(), client, vpc, "team-a", state, "10.244.0.5", "team-a", "app-1", "uid-1", "", ""); err != nil {
 		t.Fatalf("first attachPort: %v", err)
 	}
-	ip, _, _, _, err := attachPort(client, vpc, "team-a", state, "10.244.0.6", "team-a", "app-2", "uid-2", "", "")
+	ip, _, _, _, err := attachPort(t.Context(), client, vpc, "team-a", state, "10.244.0.6", "team-a", "app-2", "uid-2", "", "")
 	if err != nil {
 		t.Fatalf("second attachPort: %v", err)
 	}
@@ -253,7 +256,7 @@ func TestClaimIP_RetriesOnNameCollision(t *testing.T) {
 	vpc := newVPC("team-a", "tenant-a", 100, "10.10.0.0/24")
 	state := &datapath.AgentState{NodeName: "node1", NodeIP: "192.0.2.1"}
 
-	ip, _, port, _, err := attachPort(client, vpc, "team-a", state, "10.244.0.5", "team-a", "app-1", "uid-1", "", "")
+	ip, _, port, _, err := attachPort(t.Context(), client, vpc, "team-a", state, "10.244.0.5", "team-a", "app-1", "uid-1", "", "")
 	if err != nil {
 		t.Fatalf("claimIP: %v", err)
 	}
@@ -277,7 +280,7 @@ func TestClaimIP_ExhaustionErrors(t *testing.T) {
 	vpc := newVPC("team-a", "tenant-a", 200, "10.0.0.0/30")
 	state := &datapath.AgentState{NodeName: "node1", NodeIP: "192.0.2.1"}
 
-	if _, _, _, _, err := attachPort(client, vpc, "team-a", state, "10.244.0.5", "team-a", "app-1", "uid-1", "", ""); err == nil {
+	if _, _, _, _, err := attachPort(t.Context(), client, vpc, "team-a", state, "10.244.0.5", "team-a", "app-1", "uid-1", "", ""); err == nil {
 		t.Fatal("attachPort on exhausted VPC = nil error, want exhaustion error")
 	}
 }
@@ -311,7 +314,7 @@ func TestRequireVPCBinding(t *testing.T) {
 				objs = append(objs, o)
 			}
 			client := sdnfake.NewSimpleClientset(objs...)
-			err := requireVPCBinding(client, c.podNS, c.vNS, c.vName)
+			err := requireVPCBinding(t.Context(), client, c.podNS, c.vNS, c.vName)
 			if c.wantAllow && err != nil {
 				t.Fatalf("want allowed, got error: %v", err)
 			}
@@ -319,5 +322,45 @@ func TestRequireVPCBinding(t *testing.T) {
 				t.Fatal("want denied, got nil error")
 			}
 		})
+	}
+}
+
+// A rollback runs precisely when the operation went wrong, and the commonest
+// way for it to go wrong is now the operation context expiring. If the release
+// inherited that cancellation it would fail instantly and leak the claim it
+// exists to return — so assert the release actually happens against a dead
+// parent, not merely that the context object looks right.
+func TestReleaseFabricIPsRunsAfterTheOperationContextDied(t *testing.T) {
+	client := localfake.NewSimpleClientset(&localv1alpha1.FabricIP{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   localv1alpha1.FabricIPName("10.244.0.7"),
+			Labels: map[string]string{labelFabricPodUID: "uid-1"},
+		},
+		Spec: localv1alpha1.FabricIPSpec{Address: "10.244.0.7", PodUID: "uid-1"},
+	})
+
+	dead, cancel := context.WithCancel(t.Context())
+	cancel() // the ADD blew its budget
+	if dead.Err() == nil {
+		t.Fatal("parent context should be cancelled")
+	}
+
+	cctx, ccancel := cleanupContext(dead)
+	defer ccancel()
+	if err := cctx.Err(); err != nil {
+		t.Fatalf("cleanup context inherited the parent's cancellation: %v", err)
+	}
+	if _, ok := cctx.Deadline(); !ok {
+		t.Fatal("cleanup context has no deadline: a rollback could hang forever")
+	}
+
+	releaseFabricIPs(cctx, client, "uid-1")
+
+	left, err := client.LocalV1alpha1().FabricIPs().List(t.Context(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(left.Items) != 0 {
+		t.Fatalf("claim not released after an expired parent: %d left", len(left.Items))
 	}
 }
