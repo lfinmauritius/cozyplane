@@ -30,6 +30,72 @@ autoregistration controller, the CRD-delete grant, and the ordering constraint
 between the two charts. The server still registers its own APIService at
 startup — but that is now a plain create, because nothing else creates one.
 
+## 0a. Bootstrap ordering — the controller runs degraded, never crashlooping
+
+Deleting the takeover deleted the ordering constraint *between the two charts*,
+not the ordering itself. It survives as a plain fact of every fresh install:
+
+> **The CNI installs first, and `sdn.cozystack.io` is served last.**
+
+cozyplane is the cluster's CNI, so it must be up before anything else can be
+scheduled. Its aggregated apiserver needs cert-manager (serving cert, etcd PKI),
+an `EtcdCluster` and a `StorageClass` — all ordinary default-network pods, all of
+which therefore need the CNI first. So there is always a window, minutes long on a
+real cluster, in which `cozyplane-controller` is running and the group it mostly
+watches does not exist. This is not a packaging mistake to order away; it is the
+contract the controller is built against.
+
+**The contract.** `cozyplane-controller` is one process that runs in two states.
+It never exits because an API group is missing.
+
+| | Degraded (group absent) | Full (group served) |
+|---|---|---|
+| FabricIP GC (`local.sdn.cozystack.io`) | running | running |
+| health / readiness | Ready | Ready |
+| VPC, VPCBinding, VPCPeering, VPCGateway, PortGC, PersistentPort, PortMembership, SecurityGroup, ServiceVIP, FloatingIP, Gateway | **not registered** | running |
+
+The degraded set is everything that needs only the kube API and the CRD-served
+group — today the FabricIP GC, which reclaims an underlay address whose pod is
+gone. That work is *most* needed during bootstrap (pods are churning while the
+platform installs), so taking it down with the missing group was the real cost of
+the old behaviour.
+
+**Why the old behaviour was a crashloop, not a wait.** controller-runtime treats
+an unresolvable kind as fatal: `source.Kind` retries `no matches for kind "VPC" in
+version "sdn.cozystack.io/v1alpha1"` until the per-source `CacheSyncTimeout`
+fires, `Controller.Start` returns that error, and the manager exits. Every
+controller in the process dies with it, kubelet restarts the pod, and the cycle
+repeats for the length of the window.
+
+**The gate.** `internal/apigate` holds a manager `Runnable` that polls discovery
+for `sdn.cozystack.io/v1alpha1` (default every 15s) and calls the sdn
+controllers' registration the first time it answers, adding them to the
+*already-running* manager — controller-runtime accepts `Add` after `Start` and
+starts the runnable on the spot. On a cluster where the group is served from the
+start the first probe succeeds and nothing is deferred at all. The probe asks for
+the group's **resource list**, not merely its presence in `/apis`: an APIService
+whose backend is not up still advertises its group, and informers against it would
+hang exactly as an absent group does. Registration happens once, and a failure
+*inside* it is a wiring bug — still fatal, exactly as a `SetupWithManager` failure
+was before.
+
+**When the group goes away again** (the apiserver is uninstalled under a running
+controller), the process does not exit. The gated controllers stay registered —
+their relists fail and client-go retries, which is not fatal — and the gate keeps
+polling so the state is visible.
+
+**Observability.** The state is stated in the log at startup and on every
+transition (`gated API group is not served yet; running DEGRADED…` /
+`gated controllers started; no longer degraded`), and exported as
+`cozyplane_controller_api_group_served` and
+`cozyplane_controller_api_group_controllers_started`, both labelled by group. The
+two can legitimately disagree — `served=0, started=1` is "the apiserver was
+removed under running controllers", which is exactly the state worth alerting on.
+Health and readiness stay plain pings on purpose: a degraded controller is doing
+all the work currently possible, and flapping the pod NotReady for the whole
+window would hide that rather than report it. (The shipped manifests pass
+`--metrics-bind-address=0`, so the log is the signal until metrics are turned on.)
+
 The old text follows for the record.
 
 ## 0b. (Historical) Two serving modes, one group — and the takeover
