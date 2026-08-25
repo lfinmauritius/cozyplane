@@ -1,0 +1,40 @@
+---
+# The aggregated API server for sdn.cozystack.io, split out of
+# networking.yaml on purpose: the CNI installs before everything, while this
+# needs cert-manager Certificates, an EtcdCluster from the etcd-operator, and a
+# StorageClass — so it must come after the storage layer. One PackageSource
+# cannot express both positions.
+#
+# The GitRepository this references is defined in networking.yaml; one source
+# object serves both PackageSources.
+apiVersion: cozystack.io/v1alpha1
+kind: PackageSource
+metadata:
+  name: cozyplane.apiserver
+spec:
+  sourceRef:
+    kind: GitRepository
+    name: cozyplane
+    namespace: cozy-system
+    path: chart
+  variants:
+  - name: default
+    dependsOn:
+    - cozystack.cert-manager
+    - cozystack.etcd-operator
+    # The storage layer. The aggregated API's etcd is PVC-backed
+    # (chart/cozyplane-apiserver defaults to the operator-managed etcd on the
+    # "replicated" StorageClass), so storage must exist first.
+    #
+    # This names blockstor.storage, not the stock cozystack.linstor: the target
+    # of this file is a stand that serves blockstor as its own custom
+    # PackageSource. A cluster on stock linstor must change this one line — the
+    # PackageSource will otherwise wait forever on a package that never appears.
+    - blockstor.storage
+    components:
+    - name: cozyplane-apiserver
+      path: cozyplane-apiserver
+      install:
+        privileged: true
+        namespace: cozy-cozyplane
+        releaseName: cozyplane-apiserver
