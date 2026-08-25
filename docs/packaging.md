@@ -157,9 +157,9 @@ on: neither image needs an `imagePullSecret`, and both packages must stay public
 
 Verified 2026-08-25 against ghcr.io, anonymously:
 
-- `ghcr.io/lllamnyp/cozyplane@sha256:79866d6807d6b20f06f421435fe5e2ea4f0d6b484a0fde0411b7f3da1e326fa1`
+- `ghcr.io/lllamnyp/cozyplane@sha256:681e37c0d8f919829879bb74eb0419b8a0c7b43694ff94904d3935bc0eb22a0c`
   — an OCI index with `linux/amd64` + `linux/arm64`, and the current `main` /
-  `main-b10baf0` build.
+  `main-17b707f` build.
 - `ghcr.io/lllamnyp/cozyplane-kpr@sha256:425693919d8a4f24daea9629548180ef5cef72dece4d31bf5b6505a671147766`
   — `linux/amd64` only, pushed 2026-07-18 (tag `spn`) from the `kpr/` tree as of
   commit `72e72df`, which is still the tip state of `kpr/`.
