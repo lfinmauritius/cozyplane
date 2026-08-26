@@ -116,8 +116,9 @@ func (r *FloatingIPReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	addressAssigned := address != ""
 
 	status := sdnv1alpha1.FloatingIPStatus{
-		Phase:   sdnv1alpha1.FloatingIPPhasePending,
-		Address: address,
+		Phase:      sdnv1alpha1.FloatingIPPhasePending,
+		Address:    address,
+		Conditions: append([]metav1.Condition(nil), fip.Status.Conditions...),
 	}
 
 	setFIPCondition(&status, sdnv1alpha1.FloatingIPConditionServiceReady, svc != nil,
