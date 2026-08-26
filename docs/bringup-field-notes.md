@@ -351,13 +351,24 @@ The fix also *heals* an already-split node on rollout — no reboot needed.
   swapped pin-aside-then-rename, so the path is never absent.
 - Every one of those failed ADDs **leaked its fabric address**. `releaseFabricIPs`
   used `DeleteCollection`, but `deletecollection` is a distinct RBAC verb from
-  `delete` and the plugin's SA holds only the latter — so the release was 403'd
+  `delete` and the plugin's SA held only the latter — so the release was 403'd
   and the error discarded. One cert-manager pod burned 100 addresses across
-  kubelet's retries. It now lists-then-deletes (verbs the SA provably has), and a
-  failed release is folded into the ADD error so it surfaces in the
-  `FailedCreatePodSandBox` event instead of being invisible. A claim leaked while
-  its pod still *lives* is invisible to the controller's GC forever, which is why
-  this could accumulate silently.
+  kubelet's retries. A claim leaked while its pod still *lives* is invisible to
+  the controller's GC forever, which is why this could accumulate silently.
+
+  Two things were wrong and only one of them was the verb. The **silence** was
+  the bug that let it reach 100: a failed release is now folded into the ADD
+  error, so it surfaces in the `FailedCreatePodSandBox` event. The verb was
+  handled in the heat of the incident by rewriting the call as list-then-delete,
+  using verbs the SA already had — which works, but buys nothing and costs two
+  extra round trips on the one path that runs *while the API server is
+  unhealthy*, under the shortest budget in the plugin. The SA is now simply
+  granted `deletecollection` and the call is one round trip again. The grant
+  widens nothing: `list` + `delete` on the same cluster-scoped resource were
+  already held, so anything `DeleteCollection` reaches was reachable in N+1
+  requests regardless. **The lesson is about which half to fix** — reach for the
+  RBAC when the code is already right, and treat a swallowed error as the
+  defect rather than the operation it hid.
 
 **If you take one thing from this note:** kind cannot see this class of bug.
 Its nodes share the laptop's kernel (6.8), where pin removal *does* detach. Any

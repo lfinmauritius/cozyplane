@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -210,33 +209,24 @@ func addOffset(base net.IP, n uint64) net.IP {
 
 // releaseFabricIPs drops every address held by this pod UID.
 //
-// List-then-delete rather than DeleteCollection, deliberately: `deletecollection`
-// is a distinct RBAC verb from `delete`, the plugin's SA is granted only the
-// latter, and the failure was swallowed — so on dev4 EVERY failed ADD leaked its
-// claim, 100 addresses for a single cert-manager pod across kubelet's retries.
-// These two verbs the SA provably holds (it lists to claim and deletes on DEL),
-// so the release cannot be denied out from under us again.
+// One DeleteCollection, not a list-then-delete walk: this runs on the rollback
+// path of a failed ADD, under the plugin's shortest timeout budget and usually
+// while the API server is the unhealthy thing, so it should cost one round trip.
+// The SA is granted `deletecollection` for it (chart/cozyplane/templates/agent.yaml),
+// a verb that reaches nothing the `list` and `delete` it already holds could not.
 //
-// Still best-effort in the sense that it may never run at all (the node dies
-// mid-ADD); that case is the controller's GC to clean up once the pod is gone.
-// But a claim leaked while the pod LIVES is invisible to that GC forever, which
-// is why the error is returned rather than dropped.
+// Best-effort in that it may never run at all (the node dies mid-ADD) — the
+// controller's GC reaps the claim once the pod is gone. But a claim leaked while
+// its pod still LIVES is invisible to that GC forever, so the error is returned
+// rather than dropped; see bringup-field-notes.md §9 for how that bit.
 func releaseFabricIPs(client localclientset.Interface, podUID string) error {
 	if podUID == "" {
 		return nil
 	}
-	list, err := client.LocalV1alpha1().FabricIPs().List(context.TODO(),
-		metav1.ListOptions{LabelSelector: labelFabricPodUID + "=" + podUID})
-	if err != nil {
-		return fmt.Errorf("list fabric IP claims: %w", err)
+	if err := client.LocalV1alpha1().FabricIPs().DeleteCollection(context.TODO(),
+		metav1.DeleteOptions{},
+		metav1.ListOptions{LabelSelector: labelFabricPodUID + "=" + podUID}); err != nil {
+		return fmt.Errorf("release fabric IP claims: %w", err)
 	}
-	var errs []error
-	for i := range list.Items {
-		name := list.Items[i].Name
-		if err := client.LocalV1alpha1().FabricIPs().Delete(context.TODO(), name,
-			metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			errs = append(errs, fmt.Errorf("delete %s: %w", name, err))
-		}
-	}
-	return errors.Join(errs...)
+	return nil
 }
