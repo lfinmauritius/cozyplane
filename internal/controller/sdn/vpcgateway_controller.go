@@ -100,6 +100,7 @@ func (r *VPCGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		Phase:       sdnv1alpha1.VPCGatewayPhasePending,
 		NATAddress:  natAddr,
 		NATAddress6: natAddr6,
+		Conditions:  append([]metav1.Condition(nil), gw.Status.Conditions...),
 	}
 	setGWCondition(&status, sdnv1alpha1.VPCGatewayConditionVPCResolved, vpcOK,
 		"VPCResolved", "spec.vpcRef names a VPC in this namespace")
