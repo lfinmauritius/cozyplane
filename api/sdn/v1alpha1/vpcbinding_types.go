@@ -44,6 +44,17 @@ type VPCBindingSpec struct {
 	// of living in an operator's head.
 	// +optional
 	AllowForwarding bool `json:"allowForwarding,omitempty"`
+
+	// ForwardingCIDRs narrows AllowForwarding to declared remote prefixes
+	// (issue #6). Empty (the default) keeps the blanket grant above — any
+	// foreign source. Non-empty scopes it: the datapath admits a foreign source
+	// ONLY when it falls within one of these CIDRs, and anti-spoofing stays on
+	// for everything else. This is the difference between "this VM is a VPN
+	// endpoint for 10.50.0.0/16" and "this VM may impersonate anything" — and it
+	// is exactly what kube-ovn cannot express (its allowed-address-pair takes
+	// host IPs only). Ignored unless AllowForwarding is set.
+	// +optional
+	ForwardingCIDRs []string `json:"forwardingCIDRs,omitempty"`
 }
 
 // +genclient

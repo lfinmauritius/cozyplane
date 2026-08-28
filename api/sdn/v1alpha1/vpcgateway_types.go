@@ -53,6 +53,12 @@ const (
 	// been made the VPC's door. False (with the reason in the message) when the
 	// selector matches nothing, or matches a workload with no Port here yet.
 	VPCGatewayConditionApplianceResolved = "ApplianceResolved"
+
+	// VPCGatewayConditionRoutesResolved is True when every spec.routes entry
+	// resolved to a live, forwarding-granted Port; False (with a message naming
+	// the offending route) when one did not — an unresolved selector, a route to
+	// an ungranted Port, or a CIDR overlapping a forbidden cluster network.
+	VPCGatewayConditionRoutesResolved = "RoutesResolved"
 )
 
 // VPCGatewayNAT configures many-to-one egress for pods with no address of their
@@ -132,6 +138,50 @@ type VPCGatewaySpec struct {
 	// workload's Port in this VPC and spawns no gateway pod of its own.
 	// +optional
 	Appliance *VPCGatewayAppliance `json:"appliance,omitempty"`
+
+	// Routes is the VPC's route table for off-VPC destinations (issue #6). Until
+	// now a VPC had exactly two off-net dispositions: the default gateway
+	// (NAT egress / internet) or drop. A route adds a third — "these remote
+	// prefixes go through THIS workload" — and once there are three there is a
+	// table, of which the NAT gateway is retroactively just the default entry.
+	//
+	// Each route names remote CIDRs and the workload (an appliance leg in this
+	// VPC — a VPN endpoint, a router) they resolve through, by identity. The
+	// datapath consults it BEFORE the NAT decision, so a routed prefix reaches
+	// the appliance instead of being masqueraded toward the internet; a miss
+	// falls through to NAT/drop exactly as today. The workload may reschedule or
+	// change IP and the route re-resolves — a route never names an address.
+	//
+	// A route only delivers; the right of the target to forward a foreign
+	// (remote-site) source is the separate VPCBinding.allowForwarding grant. A
+	// route to a Port whose binding lacks that grant is inert, reported in a
+	// condition, and widens nothing.
+	// +optional
+	Routes []VPCGatewayRoute `json:"routes,omitempty"`
+}
+
+// VPCGatewayRoute directs a set of off-VPC prefixes through a named workload.
+type VPCGatewayRoute struct {
+	// CIDRs are the remote prefixes this route matches (v4 or v6). They must not
+	// overlap the cluster's own networks (pod/service/node/join, link-local);
+	// the controller refuses such a route in a condition.
+	CIDRs []string `json:"cidrs"`
+
+	// Via selects the workload the matched traffic is delivered to.
+	Via VPCGatewayVia `json:"via"`
+}
+
+// VPCGatewayVia selects a route's next-hop workload — the same shape as an
+// appliance selector, resolved to a Port identity in this VPC.
+type VPCGatewayVia struct {
+	// PodSelector selects the next-hop pod (a Deployment or VM pod whose name
+	// changes underneath it; a selector so the route survives that).
+	PodSelector metav1.LabelSelector `json:"podSelector"`
+
+	// Namespace is where to look for it. Empty means the VPCGateway's own
+	// namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // VPCGatewayStatus is the observed state of a VPCGateway.
@@ -174,6 +224,13 @@ type VPCGatewayStatus struct {
 	// +optional
 	AppliancePort string `json:"appliancePort,omitempty"`
 
+	// Routes reports how each spec.routes entry resolved: the CIDRs it matched
+	// and the cluster-scoped Port name they were programmed toward, so an
+	// operator sees which leg a route landed on (and, when empty, that it did
+	// not resolve — the RoutesResolved condition carries why).
+	// +optional
+	Routes []VPCGatewayRouteStatus `json:"routes,omitempty"`
+
 	// Phase is the lifecycle phase.
 	// +optional
 	Phase VPCGatewayPhase `json:"phase,omitempty"`
@@ -181,6 +238,17 @@ type VPCGatewayStatus struct {
 	// Conditions is the detailed state.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// VPCGatewayRouteStatus reports one resolved route.
+type VPCGatewayRouteStatus struct {
+	// CIDRs echoes the spec route's prefixes.
+	CIDRs []string `json:"cidrs"`
+	// Port is the cluster-scoped Port name the CIDRs were programmed toward,
+	// empty when the route did not resolve (no live selected Port, or the
+	// selected Port's binding lacks allowForwarding).
+	// +optional
+	Port string `json:"port,omitempty"`
 }
 
 // +genclient

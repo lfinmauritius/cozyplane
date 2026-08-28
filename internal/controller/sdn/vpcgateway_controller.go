@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -112,11 +113,25 @@ func (r *VPCGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// The per-VPC route table (issue #6): resolve each route's next-hop selector
+	// to a Port identity in this VPC, by the same oldest-wins rule the appliance
+	// uses. The agent programs vpc_routes from this status; the datapath enforces
+	// the forwarding grant.
+	var routeStatus []sdnv1alpha1.VPCGatewayRouteStatus
+	routesProblem := ""
+	if len(gw.Spec.Routes) > 0 && vpcOK {
+		routeStatus, routesProblem, err = r.reconcileRoutes(ctx, gw, vpc)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	status := sdnv1alpha1.VPCGatewayStatus{
 		Phase:         sdnv1alpha1.VPCGatewayPhasePending,
 		NATAddress:    natAddr,
 		NATAddress6:   natAddr6,
 		AppliancePort: appliancePort,
+		Routes:        routeStatus,
 	}
 	setGWCondition(&status, sdnv1alpha1.VPCGatewayConditionVPCResolved, vpcOK,
 		"VPCResolved", "spec.vpcRef names a VPC in this namespace")
@@ -141,6 +156,15 @@ func (r *VPCGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		setGWCondition(&status, sdnv1alpha1.VPCGatewayConditionApplianceResolved,
 			appliancePort != "", "ApplianceResolved",
 			applianceMessage(appliancePort, applianceErr))
+	}
+	if len(gw.Spec.Routes) > 0 {
+		if routesProblem == "" {
+			setGWCondition(&status, sdnv1alpha1.VPCGatewayConditionRoutesResolved, true,
+				"RoutesResolved", "every route resolved to a live next-hop Port")
+		} else {
+			setGWCondition(&status, sdnv1alpha1.VPCGatewayConditionRoutesResolved, false,
+				"RouteUnresolved", routesProblem)
+		}
 	}
 	if vpcOK && exclusive {
 		status.Phase = sdnv1alpha1.VPCGatewayPhaseReady
@@ -446,7 +470,8 @@ func setGWCondition(status *sdnv1alpha1.VPCGatewayStatus, condType string, ok bo
 func gwStatusEqual(a, b sdnv1alpha1.VPCGatewayStatus) bool {
 	if a.Phase != b.Phase || a.NATAddress != b.NATAddress || a.NATAddress6 != b.NATAddress6 ||
 		a.AppliancePort != b.AppliancePort ||
-		len(a.Conditions) != len(b.Conditions) {
+		len(a.Conditions) != len(b.Conditions) ||
+		!routeStatusEqual(a.Routes, b.Routes) {
 		return false
 	}
 	// By type, not by index: meta.SetStatusCondition owns the ordering now, and
@@ -457,6 +482,25 @@ func gwStatusEqual(a, b sdnv1alpha1.VPCGatewayStatus) bool {
 		cb := meta.FindStatusCondition(b.Conditions, ca.Type)
 		if cb == nil || cb.Status != ca.Status || cb.Reason != ca.Reason || cb.Message != ca.Message {
 			return false
+		}
+	}
+	return true
+}
+
+// routeStatusEqual compares resolved-route status by value (order matters — it
+// mirrors spec.routes order).
+func routeStatusEqual(a, b []sdnv1alpha1.VPCGatewayRouteStatus) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Port != b[i].Port || len(a[i].CIDRs) != len(b[i].CIDRs) {
+			return false
+		}
+		for j := range a[i].CIDRs {
+			if a[i].CIDRs[j] != b[i].CIDRs[j] {
+				return false
+			}
 		}
 	}
 	return true
@@ -558,6 +602,71 @@ func (r *VPCGatewayReconciler) reconcileAppliance(ctx context.Context, gw *sdnv1
 	return best.Name, "", nil
 }
 
+// reconcileRoutes resolves each spec.routes entry's next-hop selector to a Port
+// identity in this VPC, by the same oldest-wins total order the appliance uses,
+// and returns the per-route status. Unlike the appliance it never sets
+// spec.gateway — a route target is a forwarding leg, not the VPC's whole door.
+// An unresolved route yields an empty Port (and a problem message aggregating
+// the offenders); the datapath simply has no entry for it.
+func (r *VPCGatewayReconciler) reconcileRoutes(ctx context.Context, gw *sdnv1alpha1.VPCGateway,
+	vpc *sdnv1alpha1.VPC) (out []sdnv1alpha1.VPCGatewayRouteStatus, problem string, err error) {
+	// All Ports of this VPC, listed once and reused across routes.
+	var ports sdnv1alpha1.PortList
+	if err := r.List(ctx, &ports, client.MatchingLabels{
+		sdnv1alpha1.LabelVPCNamespace: gw.Namespace,
+		sdnv1alpha1.LabelVPC:          vpc.Name,
+	}); err != nil {
+		return nil, "", fmt.Errorf("list VPC ports: %w", err)
+	}
+
+	var unresolved []string
+	for i := range gw.Spec.Routes {
+		route := &gw.Spec.Routes[i]
+		st := sdnv1alpha1.VPCGatewayRouteStatus{CIDRs: route.CIDRs}
+		sel, e := metav1.LabelSelectorAsSelector(&route.Via.PodSelector)
+		if e != nil {
+			unresolved = append(unresolved, fmt.Sprintf("route %d: invalid selector: %v", i, e))
+			out = append(out, st)
+			continue
+		}
+		ns := route.Via.Namespace
+		if ns == "" {
+			ns = gw.Namespace
+		}
+		var pods corev1.PodList
+		if err := r.List(ctx, &pods, client.InNamespace(ns), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+			return nil, "", fmt.Errorf("list route pods: %w", err)
+		}
+		live := map[string]bool{}
+		for j := range pods.Items {
+			if pods.Items[j].DeletionTimestamp == nil {
+				live[pods.Items[j].Namespace+"/"+pods.Items[j].Name] = true
+			}
+		}
+		var best *sdnv1alpha1.Port
+		for j := range ports.Items {
+			p := &ports.Items[j]
+			if !live[p.Spec.PodNamespace+"/"+p.Spec.PodName] {
+				continue
+			}
+			if best == nil || p.CreationTimestamp.Before(&best.CreationTimestamp) ||
+				(p.CreationTimestamp.Equal(&best.CreationTimestamp) && p.Name < best.Name) {
+				best = p
+			}
+		}
+		if best == nil {
+			unresolved = append(unresolved, fmt.Sprintf("route %d: no live selected Port in VPC %q", i, vpc.Name))
+		} else {
+			st.Port = best.Name
+		}
+		out = append(out, st)
+	}
+	if len(unresolved) > 0 {
+		problem = strings.Join(unresolved, "; ")
+	}
+	return out, problem, nil
+}
+
 // clearAppliancePorts takes spec.gateway off every Port of this VPC except
 // `keep`. It runs on the no-appliance path too: dropping spec.appliance, or
 // pointing it elsewhere, must actually move the door rather than leave two.
@@ -623,9 +732,10 @@ func (r *VPCGatewayReconciler) mapPortToGateways(ctx context.Context, obj client
 	return r.gatewaysIn(ctx, ns)
 }
 
-// mapPodToGateways re-enqueues the gateways that could select this pod. Scoped
-// to namespaces that actually declare an appliance, so ordinary pod churn costs
-// a cache list and nothing more.
+// mapPodToGateways re-enqueues the gateways that could select this pod — as an
+// appliance door OR a route next-hop (issue #6). Scoped to namespaces those
+// selectors actually look in, so ordinary pod churn costs a cache list and
+// nothing more.
 func (r *VPCGatewayReconciler) mapPodToGateways(ctx context.Context, obj client.Object) []ctrl.Request {
 	var list sdnv1alpha1.VPCGatewayList
 	if err := r.List(ctx, &list); err != nil {
@@ -634,18 +744,31 @@ func (r *VPCGatewayReconciler) mapPodToGateways(ctx context.Context, obj client.
 	var out []ctrl.Request
 	for i := range list.Items {
 		g := &list.Items[i]
-		if g.Spec.Appliance == nil {
-			continue
-		}
-		ns := g.Spec.Appliance.Namespace
-		if ns == "" {
-			ns = g.Namespace
-		}
-		if ns == obj.GetNamespace() {
+		if gatewaySelectsNamespace(g, obj.GetNamespace()) {
 			out = append(out, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(g)})
 		}
 	}
 	return out
+}
+
+// gatewaySelectsNamespace reports whether a gateway's appliance or any of its
+// routes selects pods in ns.
+func gatewaySelectsNamespace(g *sdnv1alpha1.VPCGateway, ns string) bool {
+	sel := func(selNS string) bool {
+		if selNS == "" {
+			selNS = g.Namespace
+		}
+		return selNS == ns
+	}
+	if g.Spec.Appliance != nil && sel(g.Spec.Appliance.Namespace) {
+		return true
+	}
+	for i := range g.Spec.Routes {
+		if sel(g.Spec.Routes[i].Via.Namespace) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *VPCGatewayReconciler) gatewaysIn(ctx context.Context, namespace string) []ctrl.Request {
@@ -655,7 +778,7 @@ func (r *VPCGatewayReconciler) gatewaysIn(ctx context.Context, namespace string)
 	}
 	var out []ctrl.Request
 	for i := range list.Items {
-		if list.Items[i].Spec.Appliance != nil {
+		if list.Items[i].Spec.Appliance != nil || len(list.Items[i].Spec.Routes) > 0 {
 			out = append(out, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
 		}
 	}

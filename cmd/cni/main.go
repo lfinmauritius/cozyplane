@@ -359,9 +359,13 @@ type resolvedAttachment struct {
 	vpc  *sdnv1alpha1.VPC
 	cidr *net.IPNet
 	// forwarding is the VPCBinding's allowForwarding grant. It becomes
-	// PORT_F_GATEWAY on this veth, which lifts from_pod's source RPF check —
+	// PORT_F_FORWARD on this veth, which lifts from_pod's source RPF check —
 	// see docs/multi-attach.md for why that is the VPC owner's call.
 	forwarding bool
+	// forwardingCIDRs bounds a SCOPED grant (issue #6): non-nil means the leg
+	// admits a foreign source only within these prefixes (PORT_F_FWD_SCOPED +
+	// the fwd_cidrs allowlist); nil means the legacy blanket grant.
+	forwardingCIDRs []string
 }
 
 // addVPCs attaches the pod to every VPC it asked for, using the dual-address
@@ -390,7 +394,7 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 		// Authorization (default-deny): a VPCBinding in the POD's namespace must
 		// permit attaching to this VPC. Ownership (the VPC's namespace) is not
 		// enough — use is granted by a binding even within the owner's namespace.
-		forwarding, e := requireVPCBinding(ctx, client, podNS, a.VPCNamespace, a.VPCName)
+		forwarding, fwdCIDRs, e := requireVPCBinding(ctx, client, podNS, a.VPCNamespace, a.VPCName)
 		if e != nil {
 			return e
 		}
@@ -408,7 +412,7 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 		if e != nil {
 			return fmt.Errorf("vpc %s/%s CIDR: %w", a.VPCNamespace, a.VPCName, e)
 		}
-		resolved = append(resolved, resolvedAttachment{attachment: a, vpc: vpc, cidr: cidr, forwarding: forwarding})
+		resolved = append(resolved, resolvedAttachment{attachment: a, vpc: vpc, cidr: cidr, forwarding: forwarding, forwardingCIDRs: fwdCIDRs})
 	}
 	primary := resolved[0]
 
@@ -478,6 +482,9 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 		netID := uint32(r.vpc.Status.VNI)
 		if r.forwarding {
 			netID |= datapath.PortForwardFlag
+			if len(r.forwardingCIDRs) > 0 {
+				netID |= datapath.PortForwardScopedFlag
+			}
 		}
 		hostVeth := hostVethNameForIndex(args.ContainerID, r.Index)
 		podMAC, e := setupAttachment(args, r, hostVeth, vpcIP, podMACPinned, mtu, netID)
@@ -576,7 +583,7 @@ func setupAttachment(args *skel.CmdArgs, r resolvedAttachment, hostVethName stri
 	}); err != nil {
 		return nil, err
 	}
-	return podMAC, configureHostVeth(hostVethName, []net.IP{vpcIP}, netID, podMAC)
+	return podMAC, configureHostVeth(hostVethName, []net.IP{vpcIP}, netID, podMAC, r.forwardingCIDRs)
 }
 
 // addGatewayLeg gives a (default-network) gateway pod a second interface into
@@ -735,7 +742,7 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 
 	// Host side is a normal VPC port, flagged as the gateway leg so the
 	// datapath blesses the off-VPC sources it forwards inward.
-	return configureHostVeth(hostVethName, []net.IP{gwIP}, uint32(vpc.Status.VNI)|datapath.PortGatewayFlag, podMAC)
+	return configureHostVeth(hostVethName, []net.IP{gwIP}, uint32(vpc.Status.VNI)|datapath.PortGatewayFlag, podMAC, nil)
 }
 
 // requireVPCBinding implements default-deny attachment: a VPCBinding in the
@@ -750,23 +757,43 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 // same VPC; the grant is their UNION, because each was authored by someone
 // holding `export` on the VPC and a later binding must not silently revoke an
 // earlier grant.
-func requireVPCBinding(ctx context.Context, client sdnclientset.Interface, podNS, vpcNS, vpcName string) (allowForwarding bool, err error) {
+// It also reports the forwarding scope (issue #6). fwdCIDRs is non-nil only when
+// the grant is SCOPED — every binding that grants allowForwarding also named
+// forwardingCIDRs, so the union of those CIDRs bounds the leg. A nil fwdCIDRs
+// with allowForwarding=true is a BLANKET grant: at least one granting binding
+// declared no CIDRs, and a blanket grant must not be silently narrowed by
+// another's CIDRs (the union is the most permissive, as for allowForwarding).
+func requireVPCBinding(ctx context.Context, client sdnclientset.Interface, podNS, vpcNS, vpcName string) (allowForwarding bool, fwdCIDRs []string, err error) {
 	list, err := client.SdnV1alpha1().VPCBindings(podNS).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return false, fmt.Errorf("list vpcbindings in %q: %w", podNS, err)
+		return false, nil, fmt.Errorf("list vpcbindings in %q: %w", podNS, err)
 	}
 	found := false
+	blanket := false // a granting binding with no CIDRs
+	scopedCIDRs := []string{}
 	for i := range list.Items {
 		ref := list.Items[i].Spec.VPCRef
-		if ref.Namespace == vpcNS && ref.Name == vpcName {
-			found = true
-			allowForwarding = allowForwarding || list.Items[i].Spec.AllowForwarding
+		if ref.Namespace != vpcNS || ref.Name != vpcName {
+			continue
+		}
+		found = true
+		if !list.Items[i].Spec.AllowForwarding {
+			continue
+		}
+		allowForwarding = true
+		if len(list.Items[i].Spec.ForwardingCIDRs) == 0 {
+			blanket = true
+		} else {
+			scopedCIDRs = append(scopedCIDRs, list.Items[i].Spec.ForwardingCIDRs...)
 		}
 	}
 	if !found {
-		return false, fmt.Errorf("no VPCBinding in namespace %q authorizes attaching to VPC %s/%s (default-deny)", podNS, vpcNS, vpcName)
+		return false, nil, fmt.Errorf("no VPCBinding in namespace %q authorizes attaching to VPC %s/%s (default-deny)", podNS, vpcNS, vpcName)
 	}
-	return allowForwarding, nil
+	if allowForwarding && !blanket {
+		return true, scopedCIDRs, nil
+	}
+	return allowForwarding, nil, nil
 }
 
 // rebindPodIdentity re-points a reused persistent Port at the pod binding it
@@ -1034,7 +1061,7 @@ func setupVeth(args *skel.CmdArgs, cniVersion string, podIPs []net.IP, pinnedMAC
 		return nil, nil, err
 	}
 
-	if err := configureHostVeth(hostVethName, podIPs, netID, podMAC); err != nil {
+	if err := configureHostVeth(hostVethName, podIPs, netID, podMAC, nil); err != nil {
 		return nil, nil, err
 	}
 
@@ -1136,7 +1163,7 @@ func addPodAddrRoute(link netlink.Link, podIP net.IP, primary bool, vpcCIDR *net
 // forwarding, installs the /32 route (host->local-pod), attaches both classifier
 // hooks (from_pod ingress, to_pod egress), and records the pod's network id and
 // local endpoint.
-func configureHostVeth(name string, podIPs []net.IP, netID uint32, podMAC net.HardwareAddr) error {
+func configureHostVeth(name string, podIPs []net.IP, netID uint32, podMAC net.HardwareAddr, fwdCIDRs []string) error {
 	hv, err := netlink.LinkByName(name)
 	if err != nil {
 		return err
@@ -1229,6 +1256,25 @@ func configureHostVeth(name string, podIPs []net.IP, netID uint32, podMAC net.Ha
 	}
 	if err := datapath.SetPortNet(idx, netID); err != nil {
 		return err
+	}
+	// A scoped forwarding leg (issue #6): program its foreign-source allowlist
+	// keyed by this veth's ifindex. Clear first — an ifindex can be reused by a
+	// later pod, and a stale entry would widen the new leg's grant. Only when
+	// PORT_F_FWD_SCOPED is set; an unscoped/non-forwarding port consults nothing.
+	if netID&datapath.PortForwardScopedFlag != 0 {
+		if err := datapath.ClearFwdCidrs(uint32(idx)); err != nil {
+			return err
+		}
+		for _, cidr := range fwdCIDRs {
+			if err := datapath.SetFwdCidr(uint32(idx), cidr); err != nil {
+				return fmt.Errorf("program forwarding CIDR %q: %w", cidr, err)
+			}
+		}
+	} else {
+		// Not (or no longer) scoped: clear any leftover from a reused ifindex.
+		if err := datapath.ClearFwdCidrs(uint32(idx)); err != nil {
+			return err
+		}
 	}
 	// Record a local endpoint per address (keyed by network id, so overlapping
 	// VPCs stay distinct) for eBPF-redirect delivery through to_pod.

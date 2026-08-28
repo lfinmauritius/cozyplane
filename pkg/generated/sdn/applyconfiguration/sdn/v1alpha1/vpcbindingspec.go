@@ -43,6 +43,15 @@ type VPCBindingSpecApplyConfiguration struct {
 	// grant sits at the right level of authority and is visible in RBAC instead
 	// of living in an operator's head.
 	AllowForwarding *bool `json:"allowForwarding,omitempty"`
+	// ForwardingCIDRs narrows AllowForwarding to declared remote prefixes
+	// (issue #6). Empty (the default) keeps the blanket grant above — any
+	// foreign source. Non-empty scopes it: the datapath admits a foreign source
+	// ONLY when it falls within one of these CIDRs, and anti-spoofing stays on
+	// for everything else. This is the difference between "this VM is a VPN
+	// endpoint for 10.50.0.0/16" and "this VM may impersonate anything" — and it
+	// is exactly what kube-ovn cannot express (its allowed-address-pair takes
+	// host IPs only). Ignored unless AllowForwarding is set.
+	ForwardingCIDRs []string `json:"forwardingCIDRs,omitempty"`
 }
 
 // VPCBindingSpecApplyConfiguration constructs a declarative configuration of the VPCBindingSpec type for use with
@@ -64,5 +73,15 @@ func (b *VPCBindingSpecApplyConfiguration) WithVPCRef(value *VPCRefApplyConfigur
 // If called multiple times, the AllowForwarding field is set to the value of the last call.
 func (b *VPCBindingSpecApplyConfiguration) WithAllowForwarding(value bool) *VPCBindingSpecApplyConfiguration {
 	b.AllowForwarding = &value
+	return b
+}
+
+// WithForwardingCIDRs adds the given value to the ForwardingCIDRs field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the ForwardingCIDRs field.
+func (b *VPCBindingSpecApplyConfiguration) WithForwardingCIDRs(values ...string) *VPCBindingSpecApplyConfiguration {
+	for i := range values {
+		b.ForwardingCIDRs = append(b.ForwardingCIDRs, values[i])
+	}
 	return b
 }

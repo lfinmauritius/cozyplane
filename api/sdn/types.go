@@ -99,6 +99,23 @@ type VPCGatewaySpec struct {
 	// RECEIVING; the right to emit a source you do not own is the separate,
 	// export-gated VPCBinding.AllowForwarding (docs/multi-attach.md).
 	Appliance *VPCGatewayAppliance
+
+	// Routes is the VPC's route table for off-VPC destinations (issue #6):
+	// remote prefixes delivered through a named appliance leg by identity,
+	// consulted before the NAT decision. The NAT gateway is the default entry.
+	Routes []VPCGatewayRoute
+}
+
+// VPCGatewayRoute directs off-VPC prefixes through a named workload.
+type VPCGatewayRoute struct {
+	CIDRs []string
+	Via   VPCGatewayVia
+}
+
+// VPCGatewayVia selects a route's next-hop workload, resolved to a Port.
+type VPCGatewayVia struct {
+	PodSelector metav1.LabelSelector
+	Namespace   string
 }
 
 // VPCGatewayStatus is the observed state of a VPCGateway.
@@ -113,6 +130,16 @@ type VPCGatewayStatus struct {
 	// AppliancePort is the Port currently serving as the VPC's door when
 	// Appliance is set (the cluster-scoped Port name).
 	AppliancePort string
+
+	// Routes reports how each spec route resolved (its CIDRs and the Port they
+	// were programmed toward).
+	Routes []VPCGatewayRouteStatus
+}
+
+// VPCGatewayRouteStatus reports one resolved route.
+type VPCGatewayRouteStatus struct {
+	CIDRs []string
+	Port  string
 }
 
 // VPCGatewayAppliance selects the tenant workload that serves as the VPC's door.
@@ -140,6 +167,140 @@ type VPCGatewayList struct {
 	metav1.TypeMeta
 	metav1.ListMeta
 	Items []VPCGateway
+}
+
+// VPNGatewayPhase is the lifecycle phase of a VPNGateway.
+type VPNGatewayPhase string
+
+const (
+	VPNGatewayPhasePending VPNGatewayPhase = "Pending"
+	VPNGatewayPhaseReady   VPNGatewayPhase = "Ready"
+)
+
+// VPNGatewayWireGuard configures a WireGuard tunnel endpoint.
+type VPNGatewayWireGuard struct {
+	ListenPort int32
+}
+
+// VPNGatewayIPsec configures an IKEv2/strongSwan tunnel endpoint.
+type VPNGatewayIPsec struct {
+	Proposals []string
+}
+
+// VPNExternalAddress selects the tunnel endpoint's external address.
+type VPNExternalAddress struct {
+	LoadBalancerClass string
+	AddressClaimName  string
+}
+
+// VPNGatewaySpec declares a managed tunnel endpoint for a VPC (issue #6).
+type VPNGatewaySpec struct {
+	VPCRef           LocalVPCRef
+	WireGuard        *VPNGatewayWireGuard
+	IPsec            *VPNGatewayIPsec
+	ExternalAddress  VPNExternalAddress
+	HighAvailability bool
+}
+
+// VPNGatewayStatus is the observed state of a VPNGateway.
+type VPNGatewayStatus struct {
+	Address       string
+	PublicKey     string
+	AppliancePort string
+	Routes        []VPCGatewayRouteStatus
+	Phase         VPNGatewayPhase
+	Conditions    []metav1.Condition
+}
+
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// VPNGateway is a managed tunnel endpoint for a VPC (issue #6).
+type VPNGateway struct {
+	metav1.TypeMeta
+	metav1.ObjectMeta
+
+	Spec   VPNGatewaySpec
+	Status VPNGatewayStatus
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// VPNGatewayList contains a list of VPNGateway.
+type VPNGatewayList struct {
+	metav1.TypeMeta
+	metav1.ListMeta
+	Items []VPNGateway
+}
+
+// VPNConnectionPhase is the lifecycle phase of a VPNConnection.
+type VPNConnectionPhase string
+
+const (
+	VPNConnectionPhasePending     VPNConnectionPhase = "Pending"
+	VPNConnectionPhaseEstablished VPNConnectionPhase = "Established"
+)
+
+// LocalVPNGatewayRef references a VPNGateway in the same namespace.
+type LocalVPNGatewayRef struct {
+	Name string
+}
+
+// VPNConnectionWireGuard configures a WireGuard peer.
+type VPNConnectionWireGuard struct {
+	PeerPublicKey         string
+	PeerEndpoint          string
+	PresharedKeySecretRef string
+	PersistentKeepalive   int32
+}
+
+// VPNConnectionIPsecAuth configures IPsec peer authentication.
+type VPNConnectionIPsecAuth struct {
+	PSKSecretRef string
+}
+
+// VPNConnectionIPsec configures an IKEv2 peer.
+type VPNConnectionIPsec struct {
+	PeerAddress string
+	Auth        VPNConnectionIPsecAuth
+	Proposals   []string
+	DPDDelay    int32
+}
+
+// VPNConnectionSpec declares one tunnel to a remote site (issue #6).
+type VPNConnectionSpec struct {
+	GatewayRef  LocalVPNGatewayRef
+	RemoteCIDRs []string
+	WireGuard   *VPNConnectionWireGuard
+	IPsec       *VPNConnectionIPsec
+}
+
+// VPNConnectionStatus is the observed state of a VPNConnection.
+type VPNConnectionStatus struct {
+	Phase         VPNConnectionPhase
+	LastHandshake *metav1.Time
+	Conditions    []metav1.Condition
+}
+
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// VPNConnection is one tunnel to a remote site, terminated by a VPNGateway.
+type VPNConnection struct {
+	metav1.TypeMeta
+	metav1.ObjectMeta
+
+	Spec   VPNConnectionSpec
+	Status VPNConnectionStatus
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// VPNConnectionList contains a list of VPNConnection.
+type VPNConnectionList struct {
+	metav1.TypeMeta
+	metav1.ListMeta
+	Items []VPNConnection
 }
 
 // VPCStatus is the observed state of a VPC.
@@ -204,6 +365,11 @@ type VPCBindingSpec struct {
 	// SecurityGroups, so it is authored by whoever holds `export` on the VPC
 	// (docs/multi-attach.md).
 	AllowForwarding bool
+
+	// ForwardingCIDRs narrows AllowForwarding to declared remote prefixes
+	// (issue #6). Empty keeps the blanket grant; non-empty admits a foreign
+	// source only within these CIDRs.
+	ForwardingCIDRs []string
 }
 
 // +genclient

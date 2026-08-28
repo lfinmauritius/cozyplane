@@ -50,8 +50,20 @@ egress:
   # (:53 only), so tenant pods resolve with a stock resolv.conf.
   clusterDNS: "10.96.0.10"
   # Additional cluster-internal networks VPC tenants must not reach through
-  # their gateways (e.g. the node/management network).
+  # their gateways (e.g. the node/management network). Also feeds the managed-VPN
+  # route-CIDR deny-set — include the node network here so it is covered.
   internalCIDRs: []
+
+# Managed VPN (issue #6, docs/vpn.md). The controller runs tunnel appliances for
+# VPNGateway/VPNConnection; these bound their placement and per-tenant scale.
+vpn:
+  # Comma-separated "key=value" labels selecting a dedicated gateway node pool.
+  gatewayNodeSelector: ""
+  # Optional taint key tolerated with Exists/NoSchedule.
+  gatewayTolerationKey: ""
+  # Zero uses the controller defaults.
+  maxGatewaysPerNamespace: 0
+  maxConnectionsPerGateway: 0
 
 agent:
   priorityClassName: system-node-critical
