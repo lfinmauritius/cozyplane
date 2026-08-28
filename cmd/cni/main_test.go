@@ -346,12 +346,70 @@ func TestRequireVPCBinding(t *testing.T) {
 				objs = append(objs, o)
 			}
 			client := sdnfake.NewSimpleClientset(objs...)
-			_, err := requireVPCBinding(t.Context(), client, c.podNS, c.vNS, c.vName)
+			_, _, err := requireVPCBinding(t.Context(), client, c.podNS, c.vNS, c.vName)
 			if c.wantAllow && err != nil {
 				t.Fatalf("want allowed, got error: %v", err)
 			}
 			if !c.wantAllow && err == nil {
 				t.Fatal("want denied, got nil error")
+			}
+		})
+	}
+}
+
+// The forwarding grant's SCOPE (issue #6) is a security control: a blanket
+// grant (allowForwarding, no CIDRs) must win over a scoped one, so a later
+// binding can never silently narrow an earlier owner's grant — the union is the
+// most permissive, exactly as for allowForwarding itself.
+func TestRequireVPCBindingForwardingScope(t *testing.T) {
+	fwd := func(name string, allow bool, cidrs ...string) *sdnv1alpha1.VPCBinding {
+		return &sdnv1alpha1.VPCBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a"},
+			Spec: sdnv1alpha1.VPCBindingSpec{
+				VPCRef:          sdnv1alpha1.VPCRef{Namespace: "team-a", Name: "tenant-a"},
+				AllowForwarding: allow,
+				ForwardingCIDRs: cidrs,
+			},
+		}
+	}
+	cases := []struct {
+		name       string
+		objs       []*sdnv1alpha1.VPCBinding
+		wantAllow  bool
+		wantScoped bool
+		wantCIDRs  []string
+	}{
+		{"no forwarding", []*sdnv1alpha1.VPCBinding{fwd("b", false)}, false, false, nil},
+		{"scoped grant", []*sdnv1alpha1.VPCBinding{fwd("b", true, "10.20.0.0/16")}, true, true, []string{"10.20.0.0/16"}},
+		{"blanket grant", []*sdnv1alpha1.VPCBinding{fwd("b", true)}, true, false, nil},
+		{"blanket beats scoped", []*sdnv1alpha1.VPCBinding{fwd("s", true, "10.20.0.0/16"), fwd("b", true)}, true, false, nil},
+		{"two scoped union", []*sdnv1alpha1.VPCBinding{fwd("a", true, "10.20.0.0/16"), fwd("b", true, "10.30.0.0/16")}, true, true, []string{"10.20.0.0/16", "10.30.0.0/16"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			objs := make([]runtime.Object, 0, len(c.objs))
+			for _, o := range c.objs {
+				objs = append(objs, o)
+			}
+			client := sdnfake.NewSimpleClientset(objs...)
+			allow, cidrs, err := requireVPCBinding(t.Context(), client, "team-a", "team-a", "tenant-a")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if allow != c.wantAllow {
+				t.Errorf("allow = %v, want %v", allow, c.wantAllow)
+			}
+			scoped := cidrs != nil
+			if scoped != c.wantScoped {
+				t.Errorf("scoped = %v (cidrs %v), want %v", scoped, cidrs, c.wantScoped)
+			}
+			if len(cidrs) != len(c.wantCIDRs) {
+				t.Fatalf("cidrs = %v, want %v", cidrs, c.wantCIDRs)
+			}
+			for i := range cidrs {
+				if cidrs[i] != c.wantCIDRs[i] {
+					t.Errorf("cidr[%d] = %q, want %q", i, cidrs[i], c.wantCIDRs[i])
+				}
 			}
 		})
 	}

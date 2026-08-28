@@ -69,7 +69,7 @@ func addDelegate(ctx context.Context, args *skel.CmdArgs, conf *NetConf,
 	// point: a NetworkAttachmentDefinition names a VPC, it does not grant one. A
 	// hand-written NAD pointing at another tenant's VPC gets nothing, because the
 	// VPCBinding in the POD's namespace still has to permit the attachment.
-	forwarding, err := requireVPCBinding(ctx, client, podNS, a.VPCNamespace, a.VPCName)
+	forwarding, fwdCIDRs, err := requireVPCBinding(ctx, client, podNS, a.VPCNamespace, a.VPCName)
 	if err != nil {
 		return err
 	}
@@ -87,7 +87,7 @@ func addDelegate(ctx context.Context, args *skel.CmdArgs, conf *NetConf,
 	if err != nil {
 		return fmt.Errorf("vpc %s/%s CIDR: %w", a.VPCNamespace, a.VPCName, err)
 	}
-	r := resolvedAttachment{attachment: a, vpc: vpc, cidr: cidr, forwarding: forwarding}
+	r := resolvedAttachment{attachment: a, vpc: vpc, cidr: cidr, forwarding: forwarding, forwardingCIDRs: fwdCIDRs}
 
 	hostVeth, err := hostVethNameForDelegate(args.ContainerID, args.IfName)
 	if err != nil {
@@ -119,6 +119,9 @@ func addDelegate(ctx context.Context, args *skel.CmdArgs, conf *NetConf,
 	netID := uint32(vpc.Status.VNI)
 	if forwarding {
 		netID |= datapath.PortForwardFlag
+		if len(fwdCIDRs) > 0 {
+			netID |= datapath.PortForwardScopedFlag
+		}
 	}
 	podMAC, err := setupAttachment(args, r, hostVeth, vpcIP, pinnedMAC, mtu, netID)
 	if err != nil {

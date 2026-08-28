@@ -19,10 +19,13 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"net"
 	"os"
+	"strings"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -60,6 +63,10 @@ func main() {
 		gatewayNamespace     string
 		internalCIDRs        string
 		clusterDNS           string
+		vpnNodeSelector      string
+		vpnTolerationKey     string
+		vpnMaxGateways       int
+		vpnMaxConnections    int
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -80,6 +87,14 @@ func main() {
 		"comma-separated cluster-internal CIDRs gateways must not forward tenant traffic to (pod, service, node networks)")
 	flag.StringVar(&clusterDNS, "cluster-dns", "",
 		"cluster DNS ClusterIP gateways allow on :53")
+	flag.StringVar(&vpnNodeSelector, "vpn-gateway-node-selector", "",
+		"comma-separated key=value node labels placing managed VPN appliances on a dedicated gateway pool (issue #6, docs/vpn.md §3.5); empty runs them anywhere")
+	flag.StringVar(&vpnTolerationKey, "vpn-gateway-toleration-key", "",
+		"taint key the managed VPN appliance tolerates (Exists/NoSchedule), so it can schedule onto a tainted gateway pool; empty adds no toleration")
+	flag.IntVar(&vpnMaxGateways, "vpn-max-gateways-per-namespace", 0,
+		"per-tenant cap on managed VPN gateways (0 uses the built-in default)")
+	flag.IntVar(&vpnMaxConnections, "vpn-max-connections-per-gateway", 0,
+		"per-gateway cap on VPN connections/peers (0 uses the built-in default)")
 
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
@@ -221,6 +236,38 @@ func main() {
 			setupLog.Error(err, "unable to create controller", "controller", "Gateway")
 			os.Exit(1)
 		}
+
+		// Managed VPN tunnels (issue #6): the same cozyplane image ships the
+		// vpn-gateway binary, so it is gated on the same --gateway-image.
+		var vpnTolerations []corev1.Toleration
+		if vpnTolerationKey != "" {
+			vpnTolerations = []corev1.Toleration{{
+				Key:      vpnTolerationKey,
+				Operator: corev1.TolerationOpExists,
+				Effect:   corev1.TaintEffectNoSchedule,
+			}}
+		}
+		if err := (&sdncontroller.VPNGatewayReconciler{
+			Client: mgr.GetClient(),
+			// Live reads for the tunnel quota — a stale cache would let a burst of
+			// concurrent creates each slip under the cap.
+			Reader: mgr.GetAPIReader(),
+			Scheme: mgr.GetScheme(),
+			Config: sdncontroller.VPNGatewayConfig{
+				Image:                    gatewayImage,
+				DefaultListenPort:        51820,
+				NodeSelector:             parseNodeSelector(vpnNodeSelector),
+				Tolerations:              vpnTolerations,
+				MaxGatewaysPerNamespace:  vpnMaxGateways,
+				MaxConnectionsPerGateway: vpnMaxConnections,
+				// The route-CIDR deny-set reuses the same cluster-internal networks
+				// the gateway pods are told never to forward to.
+				InternalCIDRs: parseCIDRs(internalCIDRs),
+			},
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "VPNGateway")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -249,4 +296,38 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// parseNodeSelector turns a "k=v,k2=v2" flag into a label map. Malformed entries
+// are skipped rather than fatal — a placement hint should never wedge startup.
+func parseNodeSelector(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(kv) == 2 && kv[0] != "" {
+			out[kv[0]] = kv[1]
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseCIDRs turns a comma-separated CIDR list into parsed networks, skipping
+// malformed entries (a placement/deny-set hint must never wedge startup).
+func parseCIDRs(s string) []*net.IPNet {
+	if s == "" {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, c := range strings.Split(s, ",") {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }

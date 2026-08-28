@@ -45,6 +45,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallSpec":        schema_cozyplane_api_sdn_v1alpha1_HostFirewallSpec(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallStatus":      schema_cozyplane_api_sdn_v1alpha1_HostFirewallStatus(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef":             schema_cozyplane_api_sdn_v1alpha1_LocalVPCRef(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPNGatewayRef":      schema_cozyplane_api_sdn_v1alpha1_LocalVPNGatewayRef(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.Port":                    schema_cozyplane_api_sdn_v1alpha1_Port(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.PortList":                schema_cozyplane_api_sdn_v1alpha1_PortList(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.PortSpec":                schema_cozyplane_api_sdn_v1alpha1_PortSpec(ref),
@@ -74,8 +75,11 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayIngress":       schema_cozyplane_api_sdn_v1alpha1_VPCGatewayIngress(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayList":          schema_cozyplane_api_sdn_v1alpha1_VPCGatewayList(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayNAT":           schema_cozyplane_api_sdn_v1alpha1_VPCGatewayNAT(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRoute":         schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRoute(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRouteStatus":   schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRouteStatus(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewaySpec":          schema_cozyplane_api_sdn_v1alpha1_VPCGatewaySpec(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayStatus":        schema_cozyplane_api_sdn_v1alpha1_VPCGatewayStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayVia":           schema_cozyplane_api_sdn_v1alpha1_VPCGatewayVia(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCList":                 schema_cozyplane_api_sdn_v1alpha1_VPCList(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeering":              schema_cozyplane_api_sdn_v1alpha1_VPCPeering(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeeringList":          schema_cozyplane_api_sdn_v1alpha1_VPCPeeringList(ref),
@@ -84,6 +88,20 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCRef":                  schema_cozyplane_api_sdn_v1alpha1_VPCRef(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCSpec":                 schema_cozyplane_api_sdn_v1alpha1_VPCSpec(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCStatus":               schema_cozyplane_api_sdn_v1alpha1_VPCStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnection":           schema_cozyplane_api_sdn_v1alpha1_VPNConnection(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsec":      schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsecAuth":  schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsecAuth(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionList":       schema_cozyplane_api_sdn_v1alpha1_VPNConnectionList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionSpec":       schema_cozyplane_api_sdn_v1alpha1_VPNConnectionSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionStatus":     schema_cozyplane_api_sdn_v1alpha1_VPNConnectionStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionWireGuard":  schema_cozyplane_api_sdn_v1alpha1_VPNConnectionWireGuard(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNExternalAddress":      schema_cozyplane_api_sdn_v1alpha1_VPNExternalAddress(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGateway":              schema_cozyplane_api_sdn_v1alpha1_VPNGateway(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayIPsec":         schema_cozyplane_api_sdn_v1alpha1_VPNGatewayIPsec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayList":          schema_cozyplane_api_sdn_v1alpha1_VPNGatewayList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewaySpec":          schema_cozyplane_api_sdn_v1alpha1_VPNGatewaySpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayStatus":        schema_cozyplane_api_sdn_v1alpha1_VPNGatewayStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayWireGuard":     schema_cozyplane_api_sdn_v1alpha1_VPNGatewayWireGuard(ref),
 		resource.Quantity{}.OpenAPIModelName():                                   schema_apimachinery_pkg_api_resource_Quantity(ref),
 		v1.APIGroup{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_APIGroup(ref),
 		v1.APIGroupList{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_APIGroupList(ref),
@@ -712,6 +730,28 @@ func schema_cozyplane_api_sdn_v1alpha1_LocalVPCRef(ref common.ReferenceCallback)
 	}
 }
 
+func schema_cozyplane_api_sdn_v1alpha1_LocalVPNGatewayRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "LocalVPNGatewayRef references a VPNGateway in the same namespace.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the VPNGateway name within the referring object's namespace.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"name"},
+			},
+		},
+	}
+}
+
 func schema_cozyplane_api_sdn_v1alpha1_Port(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -875,7 +915,7 @@ func schema_cozyplane_api_sdn_v1alpha1_PortSpec(ref common.ReferenceCallback) co
 					},
 					"forwarding": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Forwarding marks a port allowed to emit packets sourced from an address that is not its own — a tenant router or firewall bridging two VPCs (docs/multi-attach.md). The CNI sets it from the VPCBinding's spec.allowForwarding; the datapath honours it as PORT_F_GATEWAY, which lifts from_pod's source RPF check and marks what the port delivers as gateway-forwarded so the destination's isolation check admits an off-VPC source.\n\nDISTINCT from Gateway, and it must stay that way. Gateway means \"this is the VPC's .1 egress leg\" and is what desiredGateways reads to program gateways[vni]; a forwarding port is not the VPC's door and must never be programmed as one. They happen to share a datapath flag, not a meaning.",
+							Description: "Forwarding marks a port allowed to emit packets sourced from an address that is not its own — a tenant router or firewall bridging two VPCs (docs/multi-attach.md). The CNI sets it from the VPCBinding's spec.allowForwarding; the datapath honours it as PORT_F_FORWARD, which lifts from_pod's source RPF check and marks the packet FWD_MARK so the destination's isolation check admits an off-VPC source — but, unlike a gateway, that source is then re-judged by the destination's SecurityGroups as a north-south source (a from:{cidr} rule). Deliberately NOT PORT_F_GATEWAY, which would skip east-west policy entirely.\n\nDISTINCT from Gateway, and it must stay that way. Gateway means \"this is the VPC's .1 egress leg\" and is what desiredGateways reads to program gateways[vni]; a forwarding port is not the VPC's door and must never be programmed as one. They happen to share a datapath flag, not a meaning.",
 							Type:        []string{"boolean"},
 							Format:      "",
 						},
@@ -1799,6 +1839,21 @@ func schema_cozyplane_api_sdn_v1alpha1_VPCBindingSpec(ref common.ReferenceCallba
 							Format:      "",
 						},
 					},
+					"forwardingCIDRs": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ForwardingCIDRs narrows AllowForwarding to declared remote prefixes (issue #6). Empty (the default) keeps the blanket grant above — any foreign source. Non-empty scopes it: the datapath admits a foreign source ONLY when it falls within one of these CIDRs, and anti-spoofing stays on for everything else. This is the difference between \"this VM is a VPN endpoint for 10.50.0.0/16\" and \"this VM may impersonate anything\" — and it is exactly what kube-ovn cannot express (its allowed-address-pair takes host IPs only). Ignored unless AllowForwarding is set.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 				},
 				Required: []string{"vpcRef"},
 			},
@@ -1987,6 +2042,80 @@ func schema_cozyplane_api_sdn_v1alpha1_VPCGatewayNAT(ref common.ReferenceCallbac
 	}
 }
 
+func schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRoute(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPCGatewayRoute directs a set of off-VPC prefixes through a named workload.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"cidrs": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CIDRs are the remote prefixes this route matches (v4 or v6). They must not overlap the cluster's own networks (pod/service/node/join, link-local); the controller refuses such a route in a condition.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"via": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Via selects the workload the matched traffic is delivered to.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayVia"),
+						},
+					},
+				},
+				Required: []string{"cidrs", "via"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayVia"},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRouteStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPCGatewayRouteStatus reports one resolved route.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"cidrs": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CIDRs echoes the spec route's prefixes.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"port": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Port is the cluster-scoped Port name the CIDRs were programmed toward, empty when the route did not resolve (no live selected Port, or the selected Port's binding lacks allowForwarding).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"cidrs"},
+			},
+		},
+	}
+}
+
 func schema_cozyplane_api_sdn_v1alpha1_VPCGatewaySpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -2028,12 +2157,26 @@ func schema_cozyplane_api_sdn_v1alpha1_VPCGatewaySpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayAppliance"),
 						},
 					},
+					"routes": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Routes is the VPC's route table for off-VPC destinations (issue #6). Until now a VPC had exactly two off-net dispositions: the default gateway (NAT egress / internet) or drop. A route adds a third — \"these remote prefixes go through THIS workload\" — and once there are three there is a table, of which the NAT gateway is retroactively just the default entry.\n\nEach route names remote CIDRs and the workload (an appliance leg in this VPC — a VPN endpoint, a router) they resolve through, by identity. The datapath consults it BEFORE the NAT decision, so a routed prefix reaches the appliance instead of being masqueraded toward the internet; a miss falls through to NAT/drop exactly as today. The workload may reschedule or change IP and the route re-resolves — a route never names an address.\n\nA route only delivers; the right of the target to forward a foreign (remote-site) source is the separate VPCBinding.allowForwarding grant. A route to a Port whose binding lacks that grant is inert, reported in a condition, and widens nothing.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRoute"),
+									},
+								},
+							},
+						},
+					},
 				},
 				Required: []string{"vpcRef"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayAppliance", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayIngress", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayNAT"},
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayAppliance", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayIngress", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayNAT", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRoute"},
 	}
 }
 
@@ -2064,6 +2207,20 @@ func schema_cozyplane_api_sdn_v1alpha1_VPCGatewayStatus(ref common.ReferenceCall
 							Format:      "",
 						},
 					},
+					"routes": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Routes reports how each spec.routes entry resolved: the CIDRs it matched and the cluster-scoped Port name they were programmed toward, so an operator sees which leg a route landed on (and, when empty, that it did not resolve — the RoutesResolved condition carries why).",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRouteStatus"),
+									},
+								},
+							},
+						},
+					},
 					"phase": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Phase is the lifecycle phase.",
@@ -2089,7 +2246,37 @@ func schema_cozyplane_api_sdn_v1alpha1_VPCGatewayStatus(ref common.ReferenceCall
 			},
 		},
 		Dependencies: []string{
-			v1.Condition{}.OpenAPIModelName()},
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRouteStatus", v1.Condition{}.OpenAPIModelName()},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPCGatewayVia(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPCGatewayVia selects a route's next-hop workload — the same shape as an appliance selector, resolved to a Port identity in this VPC.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"podSelector": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PodSelector selects the next-hop pod (a Deployment or VM pod whose name changes underneath it; a selector so the route survives that).",
+							Default:     map[string]interface{}{},
+							Ref:         ref(v1.LabelSelector{}.OpenAPIModelName()),
+						},
+					},
+					"namespace": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Namespace is where to look for it. Empty means the VPCGateway's own namespace.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"podSelector"},
+			},
+		},
+		Dependencies: []string{
+			v1.LabelSelector{}.OpenAPIModelName()},
 	}
 }
 
@@ -2432,6 +2619,600 @@ func schema_cozyplane_api_sdn_v1alpha1_VPCStatus(ref common.ReferenceCallback) c
 		},
 		Dependencies: []string{
 			v1.Condition{}.OpenAPIModelName()},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNConnection(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNConnection is one tunnel to a remote site, terminated by a VPNGateway (issue #6). Its remote CIDRs become route-table entries toward the gateway and the gateway's scoped forwarding allowlist (docs/vpn.md §3.2).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionSpec"),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionStatus"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionSpec", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionStatus", v1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNConnectionIPsec configures an IKEv2 peer, terminated by a strongSwan VPNGateway (docs/vpn.md §3.2).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"peerAddress": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PeerAddress is the remote IKE endpoint (host or IP). Required for the initiator side; a responder-only peer may leave it empty.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"auth": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Auth is how the peer authenticates.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsecAuth"),
+						},
+					},
+					"proposals": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Proposals overrides the gateway's default IKE/ESP proposals for this peer (strongSwan syntax). Empty inherits the gateway default.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"dpdDelay": {
+						SchemaProps: spec.SchemaProps{
+							Description: "DPDDelay is the dead-peer-detection interval in seconds; zero disables it.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+				Required: []string{"auth"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsecAuth"},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsecAuth(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNConnectionIPsecAuth configures IPsec peer authentication. PSK first; cert auth is a later increment.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"pskSecretRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PSKSecretRef names a Secret in this namespace holding the pre-shared key (conventional data key \"psk\", or the Secret's sole entry).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNConnectionList contains a list of VPNConnection.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnection"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnection", v1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNConnectionSpec declares one tunnel to a remote site (issue #6).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"gatewayRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "GatewayRef is the VPNGateway that terminates this connection, in this namespace.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPNGatewayRef"),
+						},
+					},
+					"remoteCIDRs": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RemoteCIDRs are the remote networks reachable over this tunnel — routed into the VPC toward the gateway and admitted as the gateway's scoped forwarding sources.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"wireguard": {
+						SchemaProps: spec.SchemaProps{
+							Description: "WireGuard configures the peer. Exactly one tunnel backend is set, and it must match the gateway's backend.",
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionWireGuard"),
+						},
+					},
+					"ipsec": {
+						SchemaProps: spec.SchemaProps{
+							Description: "IPsec configures an IKEv2 peer. Exactly one of WireGuard or IPsec is set.",
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsec"),
+						},
+					},
+				},
+				Required: []string{"gatewayRef", "remoteCIDRs"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPNGatewayRef", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsec", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionWireGuard"},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNConnectionStatus is the observed state of a VPNConnection.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Phase is the lifecycle phase.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"lastHandshake": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastHandshake is when the tunnel last completed a handshake, read back from the appliance's kernel state.",
+							Ref:         ref(v1.Time{}.OpenAPIModelName()),
+						},
+					},
+					"conditions": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions is the detailed state.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref(v1.Condition{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			v1.Condition{}.OpenAPIModelName(), v1.Time{}.OpenAPIModelName()},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionWireGuard(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNConnectionWireGuard configures a WireGuard peer.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"peerPublicKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PeerPublicKey is the remote peer's WireGuard public key.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"peerEndpoint": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PeerEndpoint is the remote peer's host:port. Optional — a roaming peer may initiate, and WireGuard learns the endpoint from its handshake.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"presharedKeySecretRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PresharedKeySecretRef names a Secret in this namespace holding an optional WireGuard preshared key.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"persistentKeepalive": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PersistentKeepalive is the keepalive interval in seconds; zero disables it.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+				Required: []string{"peerPublicKey"},
+			},
+		},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNExternalAddress(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNExternalAddress selects the tunnel endpoint's external (public) address — the address a remote peer dials. Reused verbatim from the FloatingIP model: cozyplane allocates nothing, it consumes what the LB implementation assigns.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"loadBalancerClass": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LoadBalancerClass selects which LB implementation allocates and attracts the endpoint address. Empty uses the cluster default.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"addressClaimName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AddressClaimName names an IPAddressClaim reservation whose address the endpoint should wear. Reserving it matters for IPsec, whose remote peer pins the endpoint address (docs/vpn.md §3.2). Empty means dynamic.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNGateway(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNGateway is a managed tunnel endpoint for a VPC (issue #6): the controller runs the tunnel-termination appliance, gives it a FloatingIP endpoint, grants its Port the scoped forwarding right, and routes the connections' remote CIDRs to it. The crypto lives in the appliance's netns; cozyplane provides identity, delivery, routing, policy and metering around it (docs/vpn.md §3.2).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewaySpec"),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayStatus"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewaySpec", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayStatus", v1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayIPsec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNGatewayIPsec configures an IPsec (IKEv2) tunnel endpoint terminated by a strongSwan appliance (docs/vpn.md §3.2). Its presence selects the IPsec backend; the appliance runs charon (route-based, xfrm-interface) rather than WireGuard. IKE listens on the fixed UDP 500/4500 — no listen port to pick.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"proposals": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Proposals are the default IKE/ESP proposals for connections that do not set their own (strongSwan proposal syntax, e.g. \"aes256-sha256-modp2048\"). Empty lets charon negotiate its defaults.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNGatewayList contains a list of VPNGateway.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGateway"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGateway", v1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNGatewaySpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNGatewaySpec declares a managed tunnel endpoint for a VPC (issue #6).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"vpcRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "VPCRef is the VPC this gateway terminates tunnels into, in this namespace.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef"),
+						},
+					},
+					"wireguard": {
+						SchemaProps: spec.SchemaProps{
+							Description: "WireGuard configures a WireGuard endpoint. Exactly one tunnel backend is set per gateway.",
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayWireGuard"),
+						},
+					},
+					"ipsec": {
+						SchemaProps: spec.SchemaProps{
+							Description: "IPsec configures an IKEv2/strongSwan endpoint — the enterprise-interop backend (issue #6). Exactly one of WireGuard or IPsec is set.",
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayIPsec"),
+						},
+					},
+					"externalAddress": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ExternalAddress is the public endpoint a remote peer dials.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNExternalAddress"),
+						},
+					},
+					"highAvailability": {
+						SchemaProps: spec.SchemaProps{
+							Description: "HighAvailability runs the tunnel appliance as a warm standby pair on distinct nodes (anti-affinity, same identity) instead of a single replica (docs/vpn.md §3.5, tier 2). A node loss then costs one handshake, not a reschedule: the controller's oldest-wins Port resolution re-targets the FloatingIP and the route to the survivor. The crash-zero-drop tier (dual-tunnel + BGP) is a later increment.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"vpcRef"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNExternalAddress", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayIPsec", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayWireGuard"},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNGatewayStatus is the observed state of a VPNGateway.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"address": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Address is the assigned external endpoint address — what a tenant reads out to configure the remote peer.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"publicKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PublicKey is the WireGuard public key of this gateway's endpoint, which the tenant configures the remote peer with. The private key stays in a Secret the appliance mounts; only the public half is surfaced.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"appliancePort": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AppliancePort is the cluster-scoped Port name of the tunnel appliance's leg in the VPC — the next-hop the connections' routes resolve to.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"routes": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Routes reports the connections' remote CIDRs and the Port they are programmed toward, merged into the VPC route table by the agent (the same shape VPCGateway.status.routes uses).",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRouteStatus"),
+									},
+								},
+							},
+						},
+					},
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Phase is the lifecycle phase.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"conditions": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions is the detailed state.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref(v1.Condition{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRouteStatus", v1.Condition{}.OpenAPIModelName()},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayWireGuard(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNGatewayWireGuard configures a WireGuard tunnel endpoint.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"listenPort": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ListenPort is the UDP port the WireGuard endpoint listens on. Zero lets the appliance pick the default.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 

@@ -106,9 +106,18 @@ const PortGatewayFlag uint32 = 1 << 31
 // bpf/overlay.c.
 const PortForwardFlag uint32 = 1 << 30
 
+// PortForwardScopedFlag narrows PortForwardFlag to declared prefixes
+// (VPCBinding.forwardingCIDRs, issue #6): a foreign source is admitted only if
+// it matches the port's fwd_cidrs allowlist. The CNI sets it when the binding
+// names CIDRs; clear means the legacy all-foreign behaviour. Must match
+// PORT_F_FWD_SCOPED in bpf/overlay.c.
+const PortForwardScopedFlag uint32 = 1 << 29
+
 // PortNet strips the flag bits from a ports-map value, yielding the network id
 // (the locals/remotes scope). Mirrors PORT_NET in bpf/overlay.c.
-func PortNet(v uint32) uint32 { return v &^ (PortGatewayFlag | PortForwardFlag) }
+func PortNet(v uint32) uint32 {
+	return v &^ (PortGatewayFlag | PortForwardFlag | PortForwardScopedFlag)
+}
 
 // QuarantineNet is a reserved network id assigned to a pod's ports-map entry to
 // sever it: no VPC CIDR is ever programmed into the networks map with this id
