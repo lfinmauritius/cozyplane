@@ -77,6 +77,9 @@ const (
 	// cfgHFEgEnabled arms host-firewall EGRESS: the node's own new flows are
 	// default-deny (node→node and node→local-pod stay exempt).
 	cfgHFEgEnabled = uint32(10)
+	// cfgFlowEnabled arms flow observability (docs/observability.md): every
+	// flow_emit site pays one params lookup while it is off.
+	cfgFlowEnabled = uint32(11)
 )
 
 // ResolverPort is the port the split-horizon resolver binds on the node

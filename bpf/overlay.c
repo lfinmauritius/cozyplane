@@ -621,6 +621,9 @@ struct {
                              // policyTypes: Egress — the node's OWN new flows
                              // are default-deny (node->node and node->local-pod
                              // stay exempt; docs/host-firewall.md).
+#define CFG_FLOW_ENABLED  11 // 1 while flow observability is armed: every
+                             // flow_emit site pays one params lookup when it is
+                             // not (docs/observability.md).
 
 // bpf-masquerade port range for cluster-egress SNAT (#10): disjoint from the
 // host ephemeral range (32768+) so a reverse lookup can never capture the
@@ -1838,6 +1841,261 @@ static __always_inline __u32 cfg(__u32 idx)
 	return v ? *v : 0;
 }
 
+// ---- Flow observability (docs/observability.md) ----------------------------
+// Per-flow events with verdicts and reasons, streamed to the agent through the
+// repo's first ring buffer. Off by default: every emission site is guarded by
+// one params lookup (the CFG_HF_ENABLED idiom). Emission never blocks and
+// never drops a packet — a full ring loses the EVENT and bumps flow_lost.
+
+// Verdicts.
+#define FE_V_ALLOW 0
+#define FE_V_DENY  1
+
+// Reasons — every deny names the gate that refused it. FR_MALFORMED/FR_INFRA
+// are reserved for the v2 classes so the ABI never shifts under them.
+#define FR_ALLOW       0
+#define FR_SG_INGRESS  1  // east-west SecurityGroup deny (to_pod, lb_dsr, TLV)
+#define FR_SG_EGRESS   2  // north-south SG egress deny (ns_egress_ok)
+#define FR_SG_NS       3  // north-south SG ingress deny (ns_sg_admit)
+#define FR_NP_INGRESS  4
+#define FR_NP_EGRESS   5
+#define FR_HF_INGRESS  6
+#define FR_HF_EGRESS   7
+#define FR_ISOLATION   8  // the isolation checks — entirely silent before this
+#define FR_SPOOF       9  // source-RPF/anti-spoof, at last distinct from SG
+#define FR_LB_CLOSED   10 // vpc_ingress door not opened (tenet 7)
+#define FR_LB_SRCRANGE 11 // loadBalancerSourceRanges refused the client
+#define FR_NO_GATEWAY  12 // closed island: off-VPC egress with no gateway
+#define FR_MALFORMED   13 // reserved (v2)
+#define FR_INFRA       14 // reserved (v2)
+
+// Hooks — which program observed the flow.
+#define FE_FROM_POD     0
+#define FE_TO_POD       1
+#define FE_FROM_OVERLAY 2
+#define FE_FROM_UPLINK  3
+#define FE_LB_INGRESS   4
+#define FE_LB_DSR       5
+#define FE_HF_INGRESS   6
+#define FE_HF_EGRESS    7
+
+// Event flags.
+#define FE_F_SYN 0x1
+#define FE_F_FWD 0x2 // a granted forwarding leg handed this packet on
+#define FE_F_NS  0x4 // carried NS_MARK (pod-originated north-south)
+
+#define FE_NO_DOOR 0xff
+
+// The wire record: 64 bytes, fixed layout, mirrored by datapath/flowevent.go
+// (a unit test pins size and offsets). Padding is zeroed explicitly —
+// bpf_ringbuf_reserve memory is not, and an unwritten byte would leak kernel
+// memory to the reader.
+struct flow_event {
+	__u64 ts;           // bpf_ktime_get_ns (CLOCK_MONOTONIC)
+	struct addr128 src; // NAT64-mapped, as everywhere in the datapath
+	struct addr128 dst;
+	__u32 srcnet;       // VNI (0 = default/fabric network)
+	__u32 dstnet;
+	__u16 sport;        // network order; 0 where the site never parsed L4
+	__u16 dport;
+	__u8 proto;
+	__u8 verdict;
+	__u8 reason;
+	__u8 hook;
+	__u8 door;          // NS door when applicable, FE_NO_DOOR otherwise
+	__u8 flags;
+	// L4 detail, carried only by ADMITTED flows (the allow path fills them from
+	// the trigger packet — per-flow, so tcp_flags is SYN-dominated; a deny event
+	// leaves them 0). tcp_flags is the raw TCP flags byte; icmp_type/icmp_code
+	// the ICMP/ICMPv6 first two bytes. Zero for other protocols / on denies.
+	__u8 tcp_flags;
+	__u8 icmp_type;
+	__u8 icmp_code;
+	// Explicit tail padding to the 8-byte-aligned 64: an implicit hole would
+	// go out unzeroed (ring memory is not cleared on reserve).
+	__u8 _pad[3];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 22); // 4 MiB, ~65k events
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} flow_events SEC(".maps");
+
+// Events lost to a full ring, per CPU. One cell; the agent sums it and serves
+// cozyplane_flow_events_lost_total.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, __u32);
+	__type(value, __u64);
+	__uint(max_entries, 1);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} flow_lost SEC(".maps");
+
+// Argument packing: a BPF-to-BPF call carries at most five arguments, and the
+// stack-heavy programs afford no locals for more — so the scalars ride packed
+// words. nets = srcnet<<32 | dstnet; ports = sport<<16 | dport (both network
+// order); meta = FE_META(...).
+#define FE_META(verdict, reason, hook, door, flags, proto)                     \
+	((__u64)(verdict) | ((__u64)(reason) << 8) | ((__u64)(hook) << 16) |   \
+	 ((__u64)(door) << 24) | ((__u64)(flags) << 32) | ((__u64)(proto) << 40))
+#define FE_NETS(srcnet, dstnet) (((__u64)(srcnet) << 32) | (__u32)(dstnet))
+#define FE_PORTS(sport, dport) (((__u32)(__u16)(sport) << 16) | (__u16)(dport))
+
+// flow_emit_core writes one event. Stack-free by construction: the record is
+// built directly in ring memory behind the pointer bpf_ringbuf_reserve hands
+// back (the 544 lesson — from_pod's 496-byte frame affords no event struct).
+// __always_inline so from_pod's terminal paths can use it without a callee.
+// l4 packs the admitted-flow L4 detail: tcp_flags | icmp_type<<8 | icmp_code<<16
+// (0 on denies and non-TCP/ICMP).
+static __always_inline void flow_emit_core(const struct addr128 *src,
+					   const struct addr128 *dst,
+					   __u64 nets, __u32 ports, __u64 meta, __u32 l4)
+{
+	if (!cfg(CFG_FLOW_ENABLED))
+		return;
+	struct flow_event *e = bpf_ringbuf_reserve(&flow_events, sizeof(struct flow_event), 0);
+	if (!e) {
+		__u32 z = 0;
+		__u64 *l = bpf_map_lookup_elem(&flow_lost, &z);
+		if (l)
+			(*l)++;
+		return;
+	}
+	e->ts = bpf_ktime_get_ns();
+	e->src = *src;
+	e->dst = *dst;
+	e->srcnet = nets >> 32;
+	e->dstnet = (__u32)nets;
+	e->sport = ports >> 16;
+	e->dport = (__u16)ports;
+	e->proto = (meta >> 40) & 0xff;
+	e->verdict = meta & 0xff;
+	e->reason = (meta >> 8) & 0xff;
+	e->hook = (meta >> 16) & 0xff;
+	e->door = (meta >> 24) & 0xff;
+	e->flags = (meta >> 32) & 0xff;
+	e->tcp_flags = l4 & 0xff;
+	e->icmp_type = (l4 >> 8) & 0xff;
+	e->icmp_code = (l4 >> 16) & 0xff;
+	e->_pad[0] = 0;
+	e->_pad[1] = 0;
+	e->_pad[2] = 0;
+	bpf_ringbuf_submit(e, 0);
+}
+
+// flow_emit is the BPF-to-BPF form for programs that afford a callee (to_pod
+// and everything tail-called): one call instruction per site instead of an
+// inlined body — the count_dir/count_sg_drop discipline. Deny events carry no
+// L4 detail (l4 = 0).
+static __attribute__((noinline)) void flow_emit(const struct addr128 *src,
+						const struct addr128 *dst,
+						__u64 nets, __u32 ports, __u64 meta)
+{
+	flow_emit_core(src, dst, nets, ports, meta, 0);
+}
+
+// ---- Allow verdicts: per FLOW, never per packet ----------------------------
+// flow_seen dedups admitted flows: an allow event is emitted when the packet
+// is a fresh TCP SYN or when its tuple misses this LRU; either way the tuple
+// is (re)inserted. Eviction is the TTL — a long-lived flow re-announces itself
+// when evicted, which is a feature. Subsequent packets cost one lookup (which
+// also marks the entry referenced, protecting active flows from eviction).
+struct flow_key {
+	__u32 srcnet;
+	__u32 dstnet;
+	struct addr128 src;
+	struct addr128 dst;
+	__u16 sport; // network order, 0 for port-less protocols
+	__u16 dport;
+	__u8 proto;
+	__u8 pad[3];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__type(key, struct flow_key);
+	__type(value, __u64); // first-seen bpf_ktime_get_ns
+	__uint(max_entries, 131072);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} flow_seen SEC(".maps");
+
+// Per-CPU scratch for the flow key — the np_scratch idiom: the stack-heavy
+// programs afford no 48-byte local.
+struct flow_scratch_val {
+	struct flow_key k;
+	__u8 fl; // TCP flags byte
+	__u8 pad[7];
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, __u32);
+	__type(value, struct flow_scratch_val);
+	__uint(max_entries, 1);
+} flow_scratch SEC(".maps");
+
+// flow_allow_core emits one allow event per flow. The L4 offset rides meta's
+// top 16 bits (FE_L4OFF below) because a sixth argument does not exist.
+// Stack-free: key in per-CPU scratch, record in ring memory. __always_inline
+// for from_pod's terminal paths; to_pod calls the noinline twin below.
+#define FE_L4OFF(l4off) ((__u64)(__u16)(l4off) << 48)
+static __always_inline void flow_allow_core(struct __sk_buff *skb,
+					    const struct addr128 *src,
+					    const struct addr128 *dst,
+					    __u64 nets, __u64 meta)
+{
+	if (!cfg(CFG_FLOW_ENABLED))
+		return;
+	__u32 z = 0;
+	struct flow_scratch_val *fs = bpf_map_lookup_elem(&flow_scratch, &z);
+	if (!fs)
+		return;
+	__u32 l4off = (meta >> 48) & 0xffff;
+	__u8 proto = (meta >> 40) & 0xff;
+	fs->k.srcnet = nets >> 32;
+	fs->k.dstnet = (__u32)nets;
+	fs->k.src = *src;
+	fs->k.dst = *dst;
+	fs->k.proto = proto;
+	fs->k.sport = 0;
+	fs->k.dport = 0;
+	fs->k.pad[0] = 0;
+	fs->k.pad[1] = 0;
+	fs->k.pad[2] = 0;
+	if (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
+		bpf_skb_load_bytes(skb, l4off, &fs->k.sport, 2);
+		bpf_skb_load_bytes(skb, l4off + 2, &fs->k.dport, 2);
+	}
+	int syn_new = 0;
+	__u32 l4 = 0; // tcp_flags | icmp_type<<8 | icmp_code<<16 for the record
+	if (proto == IPPROTO_TCP) {
+		fs->fl = 0;
+		bpf_skb_load_bytes(skb, l4off + 13, &fs->fl, 1);
+		syn_new = (fs->fl & 0x02) && !(fs->fl & 0x10);
+		l4 = fs->fl;
+	} else if (proto == IPPROTO_ICMP || proto == IPPROTO_ICMPV6) {
+		__u8 tc[2] = {0, 0};
+		bpf_skb_load_bytes(skb, l4off, tc, 2); // type, code
+		l4 = ((__u32)tc[0] << 8) | ((__u32)tc[1] << 16);
+	}
+	asm volatile("" ::: "memory");
+	if (!syn_new && bpf_map_lookup_elem(&flow_seen, &fs->k))
+		return; // a known flow: one lookup and out
+	__u64 now = bpf_ktime_get_ns();
+	bpf_map_update_elem(&flow_seen, &fs->k, &now, BPF_ANY);
+	if (syn_new)
+		meta |= (__u64)FE_F_SYN << 32;
+	flow_emit_core(src, dst, nets, FE_PORTS(fs->k.sport, fs->k.dport),
+		       meta & 0xffffffffffffULL, l4);
+}
+
+static __attribute__((noinline)) void flow_allow(struct __sk_buff *skb,
+						 const struct addr128 *src,
+						 const struct addr128 *dst,
+						 __u64 nets, __u64 meta)
+{
+	flow_allow_core(skb, src, dst, nets, meta);
+}
 
 // A fully-specified scoped LPM lookup: 32 scope bits + 128 address bits.
 #define LPM_FULL 160
@@ -2522,6 +2780,8 @@ static __always_inline int bridge_forward(struct __sk_buff *skb, struct iphdr *i
 	// packet leaves no connection state.
 	if ((skb->mark & NS_MARK) && !ns_sg_admit(net, vpc_ip, client128, proto, pport)) {
 		count_sg_drop(net);
+		flow_emit(&client128, &vpc_ip, FE_NETS(0, net), FE_PORTS(cport, pport),
+			  FE_META(FE_V_DENY, FR_SG_NS, FE_TO_POD, FE_NO_DOOR, FE_F_NS, proto));
 		return TC_ACT_SHOT;
 	}
 
@@ -2799,6 +3059,8 @@ static __always_inline int bridge_forward6(struct __sk_buff *skb, struct pkt *p,
 	// NS_MARK'd pod-originated traffic is gated; kubelet stays exempt.
 	if ((skb->mark & NS_MARK) && !ns_sg_admit(net, vpc_ip, p->src, proto, pport)) {
 		count_sg_drop(net);
+		flow_emit(&p->src, &vpc_ip, FE_NETS(0, net), FE_PORTS(cport, pport),
+			  FE_META(FE_V_DENY, FR_SG_NS, FE_TO_POD, FE_NO_DOOR, FE_F_NS, proto));
 		return TC_ACT_SHOT;
 	}
 	struct ct_fwd_key fk = {
@@ -2924,6 +3186,8 @@ static __always_inline int floating_forward(struct __sk_buff *skb, struct iphdr 
 		v4_to_128(&client128, ip->saddr);
 		if (l4_ports(skb, &sp, &dp) == 0 && !ns_sg_admit(net, vpc_ip, client128, proto, dp)) {
 			count_sg_drop(net);
+			flow_emit(&client128, &vpc_ip, FE_NETS(0, net), FE_PORTS(sp, dp),
+				  FE_META(FE_V_DENY, FR_SG_NS, FE_TO_POD, NS_EIP, 0, proto));
 			return TC_ACT_SHOT;
 		}
 	}
@@ -3426,6 +3690,8 @@ static __always_inline int floating_forward6(struct __sk_buff *skb, struct pkt *
 		__u16 sp, dp;
 		if (l4_ports6(skb, &sp, &dp) == 0 && !ns_sg_admit(net, vpc_ip, p->src, proto, dp)) {
 			count_sg_drop(net);
+			flow_emit(&p->src, &vpc_ip, FE_NETS(0, net), FE_PORTS(sp, dp),
+				  FE_META(FE_V_DENY, FR_SG_NS, FE_TO_POD, NS_EIP, 0, proto));
 			return TC_ACT_SHOT;
 		}
 	}
@@ -4145,8 +4411,12 @@ int cozyplane_lb_ingress(struct __sk_buff *skb)
 		s->lk.vip = p.dst;
 		s->lk.client = p.src;
 		asm volatile("" ::: "memory");
-		if (!bpf_map_lookup_elem(&lb_src, &s->lk))
-			return TC_ACT_SHOT; // declared ranges, no match: firewall drop
+		if (!bpf_map_lookup_elem(&lb_src, &s->lk)) {
+			// declared ranges, no match: firewall drop
+			flow_emit(&p.src, &p.dst, 0, FE_PORTS(sport, dport),
+				  FE_META(FE_V_DENY, FR_LB_SRCRANGE, FE_LB_INGRESS, NS_LB, 0, p.proto));
+			return TC_ACT_SHOT;
+		}
 	}
 
 	__u16 tport;
@@ -4187,10 +4457,14 @@ int cozyplane_lb_ingress(struct __sk_buff *skb)
 		// Service (docs/north-south.md).
 		if (!bpf_map_lookup_elem(&vpc_ingress, &be->net)) {
 			count_ns_denied(be->net, NS_LB);
+			flow_emit(&p.src, &s->dst, FE_NETS(0, be->net), FE_PORTS(sport, tport),
+				  FE_META(FE_V_DENY, FR_LB_CLOSED, FE_LB_INGRESS, NS_LB, 0, p.proto));
 			return TC_ACT_SHOT;
 		}
 		if (!ns_sg_admit(be->net, be->vpc_ip, s->fk.client, p.proto, tport)) {
 			count_sg_drop(be->net);
+			flow_emit(&p.src, &s->dst, FE_NETS(0, be->net), FE_PORTS(sport, tport),
+				  FE_META(FE_V_DENY, FR_SG_NS, FE_LB_INGRESS, NS_LB, 0, p.proto));
 			return TC_ACT_SHOT;
 		}
 		// The LoadBalancer door, inbound: a Service frontend the PLATFORM
@@ -4328,6 +4602,8 @@ int cozyplane_hf_ingress(struct __sk_buff *skb)
 			}
 			if (gate && !hf_gate(&hf_eallow, p.proto, dport, &p.dst)) {
 				hf_count_drop(NP_DIR_EG);
+				flow_emit(&p.src, &p.dst, 0, FE_PORTS(sport, dport),
+					  FE_META(FE_V_DENY, FR_HF_EGRESS, FE_HF_INGRESS, FE_NO_DOOR, 0, p.proto));
 				return TC_ACT_SHOT;
 			}
 		}
@@ -4376,6 +4652,8 @@ int cozyplane_hf_ingress(struct __sk_buff *skb)
 
 	if (!hf_gate(&hf_allow, p.proto, dport, &p.src)) {
 		hf_count_drop(NP_DIR_IN);
+		flow_emit(&p.src, &p.dst, 0, FE_PORTS(sport, dport),
+			  FE_META(FE_V_DENY, FR_HF_INGRESS, FE_HF_INGRESS, FE_NO_DOOR, 0, p.proto));
 		return TC_ACT_SHOT;
 	}
 	// Admitted inbound UDP: pin the node's REPLY so it passes the egress
@@ -4430,6 +4708,8 @@ int cozyplane_hf_egress(struct __sk_buff *skb)
 		}
 		if (gate && !hf_gate(&hf_eallow, p.proto, dport, &p.dst)) {
 			hf_count_drop(NP_DIR_EG);
+			flow_emit(&p.src, &p.dst, 0, FE_PORTS(sport, dport),
+				  FE_META(FE_V_DENY, FR_HF_EGRESS, FE_HF_EGRESS, FE_NO_DOOR, 0, p.proto));
 			return TC_ACT_SHOT;
 		}
 	}
@@ -4488,6 +4768,8 @@ int cozyplane_lb_dsr(struct __sk_buff *skb)
 		s->dst = be->vpc_ip;
 		if (!ns_sg_admit(be->net, be->vpc_ip, p.src, p.proto, dport)) {
 			count_sg_drop(be->net);
+			flow_emit(&p.src, &s->dst, FE_NETS(0, be->net), FE_PORTS(sport, dport),
+				  FE_META(FE_V_DENY, FR_SG_INGRESS, FE_LB_DSR, NS_LB, 0, p.proto));
 			return TC_ACT_SHOT;
 		}
 		l = local_of(be->net, be->vpc_ip);
@@ -4759,6 +5041,8 @@ int cozyplane_from_pod(struct __sk_buff *skb)
 				__u64 *d = bpf_map_lookup_elem(&sg_drops, &srcnet);
 				if (d)
 					(*d)++;
+				flow_emit_core(&p.src, &p.dst, FE_NETS(srcnet, 0), 0,
+					       FE_META(FE_V_DENY, FR_SPOOF, FE_FROM_POD, FE_NO_DOOR, 0, p.proto), 0);
 				return TC_ACT_SHOT;
 			}
 			foreign_src = 1;
@@ -4896,6 +5180,8 @@ int cozyplane_from_pod(struct __sk_buff *skb)
 						__u64 *d = bpf_map_lookup_elem(&np_drops, &s->cd.prefixlen);
 						if (d)
 							(*d)++;
+						flow_emit_core(&p.src, &p.dst, 0, (__u32)s->q.dport,
+							       FE_META(FE_V_DENY, FR_NP_EGRESS, FE_FROM_POD, FE_NO_DOOR, 0, p.proto), 0);
 						return TC_ACT_SHOT;
 					}
 				}
@@ -4960,28 +5246,46 @@ int cozyplane_from_pod(struct __sk_buff *skb)
 	// except a VPC pod's off-net traffic, which goes to the VPC's egress
 	// gateway when one exists. Fabric->VPC and unpeered cross-VPC still drop.
 	if (!nets_allowed(srcnet, dstnet)) {
-		if (!srcnet || dstnet)
+		if (!srcnet || dstnet) {
+			flow_emit_core(&p.src, &p.dst, FE_NETS(srcnet, dstnet), 0,
+				       FE_META(FE_V_DENY, FR_ISOLATION, FE_FROM_POD, FE_NO_DOOR, 0, p.proto), 0);
 			return TC_ACT_SHOT;
+		}
 		// North-south egress (v2): a grouped pod's off-VPC egress to the gateway
 		// is default-deny, opened by a to:{cidr} rule. DNS already returned via
 		// dns_steer; a grouped pod's replies pass (SYN-gated inside). No
 		// sg_drops bump here — from_pod is too stack-heavy to host the
 		// count_sg_drop BPF-to-BPF call (the reason metering lives in to_pod).
-		if (!ns_egress_ok(skb, srcnet, p.is_v6, p.proto, p.src, p.dst))
+		if (!ns_egress_ok(skb, srcnet, p.is_v6, p.proto, p.src, p.dst)) {
+			flow_emit_core(&p.src, &p.dst, FE_NETS(srcnet, 0), 0,
+				       FE_META(FE_V_DENY, FR_SG_EGRESS, FE_FROM_POD, NS_GW, 0, p.proto), 0);
 			return TC_ACT_SHOT;
+		}
 		struct gw_entry *g = bpf_map_lookup_elem(&gateways, &srcnet);
-		if (!g)
-			return TC_ACT_SHOT; // closed island: no gateway for this VPC
+		if (!g) {
+			// closed island: no gateway for this VPC
+			flow_emit_core(&p.src, &p.dst, FE_NETS(srcnet, 0), 0,
+				       FE_META(FE_V_DENY, FR_NO_GATEWAY, FE_FROM_POD, NS_GW, 0, p.proto), 0);
+			return TC_ACT_SHOT;
+		}
 		// The gateway door, outbound: this is the VPC's traffic leaving through
 		// its own gateway, and the one crossing that is *declared* rather than
 		// incidental. Counted here, at the branch, rather than at the gateway pod
 		// — where it would already wear the platform's identity, not the tenant's
 		// (docs/north-south.md §1).
 		count_ns(srcnet, skb->len, NS_GW, 0);
+		// One allow event per flow leaving through the gateway door. Inline —
+		// from_pod hosts no callee (the 544 lesson); stack-free via scratch.
+		flow_allow_core(skb, &p.src, &p.dst, FE_NETS(srcnet, 0),
+				FE_META(FE_V_ALLOW, FR_ALLOW, FE_FROM_POD, NS_GW, 0, p.proto) |
+				FE_L4OFF(p.is_v6 ? (ETH_HLEN + 40) : (ETH_HLEN + 20)));
 		if (!g->node_ip) {
 			struct endpoint *gl = local_of(srcnet, g->gw_ip);
-			if (!gl)
+			if (!gl) {
+				flow_emit_core(&p.src, &p.dst, FE_NETS(srcnet, 0), 0,
+					       FE_META(FE_V_DENY, FR_NO_GATEWAY, FE_FROM_POD, NS_GW, 0, p.proto), 0);
 				return TC_ACT_SHOT;
+			}
 			return deliver_local(skb, gl);
 		}
 		// Remote gateway: encapsulate toward its node under the VPC's VNI;
@@ -5225,8 +5529,11 @@ int cozyplane_to_pod(struct __sk_buff *skb)
 		// The policy gate below still runs, which is the entire difference
 		// between this bit and GW_MARK.
 		if (!(mark & FWD_MARK) &&
-		    !(srcnet == 0 && dstnet != 0 && mark == GW_MARK))
+		    !(srcnet == 0 && dstnet != 0 && mark == GW_MARK)) {
+			flow_emit(&p.src, &p.dst, FE_NETS(srcnet, dstnet), 0,
+				  FE_META(FE_V_DENY, FR_ISOLATION, FE_TO_POD, FE_NO_DOOR, 0, p.proto));
 			return TC_ACT_SHOT;
+		}
 	}
 
 	// SecurityGroups for a forwarded packet. This VPC holds no identity for an
@@ -5246,6 +5553,8 @@ int cozyplane_to_pod(struct __sk_buff *skb)
 		if (sg_l4(skb, p.proto, fl4off, &fdport) &&
 		    !ns_sg_admit(dstnet, p.dst, p.src, p.proto, fdport)) {
 			count_sg_drop(dstnet);
+			flow_emit(&p.src, &p.dst, FE_NETS(0, dstnet), FE_PORTS(0, fdport),
+				  FE_META(FE_V_DENY, FR_SG_NS, FE_TO_POD, FE_NO_DOOR, FE_F_FWD, p.proto));
 			return TC_ACT_SHOT;
 		}
 	}
@@ -5302,6 +5611,8 @@ int cozyplane_to_pod(struct __sk_buff *skb)
 			};
 			if (!sg_admit(&q) || !sg_egress_admit(&eq)) {
 				count_sg_drop(dstnet);
+				flow_emit(&p.src, &p.dst, FE_NETS(srcnet, dstnet), FE_PORTS(0, dport),
+					  FE_META(FE_V_DENY, FR_SG_INGRESS, FE_TO_POD, FE_NO_DOOR, 0, p.proto));
 				return TC_ACT_SHOT;
 			}
 		}
@@ -5333,10 +5644,14 @@ int cozyplane_to_pod(struct __sk_buff *skb)
 			asm volatile("" ::: "memory");
 			if (!np_ingress(s)) {
 				count_np_drop(NP_DIR_IN);
+				flow_emit(&p.src, &p.dst, FE_NETS(srcnet, 0), FE_PORTS(0, dport),
+					  FE_META(FE_V_DENY, FR_NP_INGRESS, FE_TO_POD, FE_NO_DOOR, 0, p.proto));
 				return TC_ACT_SHOT;
 			}
 			if (!np_egress(s)) {
 				count_np_drop(NP_DIR_EG);
+				flow_emit(&p.src, &p.dst, FE_NETS(srcnet, 0), FE_PORTS(0, dport),
+					  FE_META(FE_V_DENY, FR_NP_EGRESS, FE_TO_POD, FE_NO_DOOR, 0, p.proto));
 				return TC_ACT_SHOT;
 			}
 			// Node-originated UDP into a local pod: its only datapath
@@ -5355,6 +5670,14 @@ int cozyplane_to_pod(struct __sk_buff *skb)
 	// ServiceVIP replies return earlier and aren't metered yet.
 	count_dir(srcnet, skb->len, 0);
 	count_dir(dstnet, skb->len, 1);
+
+	// One allow event per admitted tenant flow (docs/observability.md).
+	// Net-0-to-net-0 is the platform's own traffic, not a tenant flow — the
+	// same rule the meters apply.
+	if (srcnet || dstnet)
+		flow_allow(skb, &p.src, &p.dst, FE_NETS(srcnet, dstnet),
+			   FE_META(FE_V_ALLOW, FR_ALLOW, FE_TO_POD, FE_NO_DOOR, 0, p.proto) |
+			   FE_L4OFF(p.is_v6 ? (ETH_HLEN + 40) : (ETH_HLEN + 20)));
 
 	return TC_ACT_OK;
 }
@@ -5461,6 +5784,9 @@ int cozyplane_from_overlay(struct __sk_buff *skb)
 					};
 					if (!sg_admit(&q) || !sg_egress_admit(&eq)) {
 						count_sg_drop(vni);
+						flow_emit(&p.src, &p.dst, FE_NETS(opt.src_net, vni),
+							  FE_PORTS(0, dport),
+							  FE_META(FE_V_DENY, FR_SG_INGRESS, FE_FROM_OVERLAY, FE_NO_DOOR, 0, p.proto));
 						return TC_ACT_SHOT;
 					}
 				}
