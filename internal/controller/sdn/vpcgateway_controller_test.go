@@ -19,9 +19,11 @@ package sdn
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -280,5 +282,111 @@ func TestGatewayNATDisabledOwnsNoService(t *testing.T) {
 	reconcileGateway(t, c, "team-a", "door")
 	if len(allNATServices(t, c, "team-a", "door")) != 0 {
 		t.Error("a NAT-disabled gateway must own no NAT Service")
+	}
+}
+
+// Conditions must carry the fields metav1.Condition requires. A bare append
+// left LastTransitionTime zero: kubectl renders a blank transition time, an
+// age computation is wrong, and the object would be rejected outright if the
+// kind ever went back to CRD-served — where lastTransitionTime is required.
+func TestGatewayConditionsAreWellFormed(t *testing.T) {
+	c := gwClient(t,
+		vpcWithCIDRs("team-a", "vpc-a", 100, "10.10.0.0/24"),
+		natGateway("team-a", "door", "vpc-a"))
+	gw := reconcileGateway(t, c, "team-a", "door")
+
+	if len(gw.Status.Conditions) == 0 {
+		t.Fatal("gateway reported no conditions")
+	}
+	seen := map[string]int{}
+	for _, cond := range gw.Status.Conditions {
+		seen[cond.Type]++
+		if cond.LastTransitionTime.IsZero() {
+			t.Errorf("condition %q has no LastTransitionTime", cond.Type)
+		}
+		if cond.Reason == "" {
+			t.Errorf("condition %q has no Reason", cond.Type)
+		}
+	}
+	for typ, n := range seen {
+		if n > 1 {
+			t.Errorf("condition %q appears %d times; conditions are a map by type", typ, n)
+		}
+	}
+	for _, want := range []string{
+		sdnv1alpha1.VPCGatewayConditionVPCResolved,
+		sdnv1alpha1.VPCGatewayConditionExclusive,
+		sdnv1alpha1.VPCGatewayConditionNATReady,
+	} {
+		if meta.FindStatusCondition(gw.Status.Conditions, want) == nil {
+			t.Errorf("condition %q is missing", want)
+		}
+	}
+}
+
+// A settled gateway must stop writing status, or every reconcile is an API
+// write and the controller never converges. This is what gwStatusEqual is for,
+// and it must keep holding now that the ordering belongs to
+// meta.SetStatusCondition rather than to the call order.
+func TestGatewayStatusConvergesAcrossReconciles(t *testing.T) {
+	c := gwClient(t,
+		vpcWithCIDRs("team-a", "vpc-a", 100, "10.10.0.0/24"),
+		natGateway("team-a", "door", "vpc-a"))
+	reconcileGateway(t, c, "team-a", "door")
+	first := reconcileGateway(t, c, "team-a", "door")
+	second := reconcileGateway(t, c, "team-a", "door")
+
+	if first.ResourceVersion != second.ResourceVersion {
+		t.Errorf("status rewritten on a no-op reconcile: %s -> %s",
+			first.ResourceVersion, second.ResourceVersion)
+	}
+}
+
+// status must be seeded from the object's existing conditions, not built fresh,
+// or meta.SetStatusCondition treats every condition as new on every write that
+// does change something — silently re-stamping LastTransitionTime on conditions
+// that did not themselves transition.
+func TestGatewayUnrelatedConditionKeepsTransitionTimeOnPartialChange(t *testing.T) {
+	c := gwClient(t,
+		vpcWithCIDRs("team-a", "vpc-a", 100, "10.10.0.0/24"),
+		natGateway("team-a", "door", "vpc-a"))
+	reconcileGateway(t, c, "team-a", "door")
+
+	got := &sdnv1alpha1.VPCGateway{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "team-a", Name: "door"}, got); err != nil {
+		t.Fatalf("get gateway: %v", err)
+	}
+	past := metav1.NewTime(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+	vr := meta.FindStatusCondition(got.Status.Conditions, sdnv1alpha1.VPCGatewayConditionVPCResolved)
+	if vr == nil {
+		t.Fatal("VPCResolved condition missing after first reconcile")
+	}
+	vr.LastTransitionTime = past
+	if err := c.Status().Update(context.Background(), got); err != nil {
+		t.Fatalf("backdate VPCResolved: %v", err)
+	}
+
+	// An earlier-named gateway on the same VPC flips "door" from exclusive to
+	// conflicted on the next reconcile — VPCResolved is untouched by this.
+	if err := c.Create(context.Background(), natGateway("team-a", "aaa", "vpc-a")); err != nil {
+		t.Fatalf("create conflicting gateway: %v", err)
+	}
+	second := reconcileGateway(t, c, "team-a", "door")
+
+	exclusive := meta.FindStatusCondition(second.Status.Conditions, sdnv1alpha1.VPCGatewayConditionExclusive)
+	if exclusive == nil || exclusive.Status != metav1.ConditionFalse {
+		t.Fatal("Exclusive should have transitioned to False")
+	}
+	if exclusive.LastTransitionTime.Equal(&past) {
+		t.Fatal("test is broken: Exclusive should be the condition that transitions, not the backdated one")
+	}
+
+	vpcResolved := meta.FindStatusCondition(second.Status.Conditions, sdnv1alpha1.VPCGatewayConditionVPCResolved)
+	if vpcResolved == nil {
+		t.Fatal("VPCResolved condition missing after second reconcile")
+	}
+	if !vpcResolved.LastTransitionTime.Equal(&past) {
+		t.Errorf("VPCResolved LastTransitionTime = %v, want unchanged %v — a sibling condition's transition must not touch it",
+			vpcResolved.LastTransitionTime, past)
 	}
 }
