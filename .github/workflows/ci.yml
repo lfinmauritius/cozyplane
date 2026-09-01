@@ -44,12 +44,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - name: helm lint (both serving modes)
+      - name: helm lint
         run: |
-          helm lint chart/cozyplane
-          helm template chart/cozyplane --set apiserver.enabled=true >/dev/null
-          helm template chart/cozyplane --set apiserver.enabled=true \
-            --set apiserver.etcd.operator.enabled=true >/dev/null
+          for c in chart/*/; do helm lint "$c"; done
+
+      # The charts are served straight from git by a PackageSource that declares
+      # no `libraries` (packages/packagesources/, docs/packaging.md), so each one
+      # must render standalone — a cozy-lib or any other chart dependency would
+      # break the install. Render exactly as the PackageSource does, values files
+      # and all.
+      - name: helm template (standalone, library-free)
+        run: |
+          helm template cozyplane chart/cozyplane \
+            -f chart/cozyplane/values.yaml -f chart/cozyplane/values-talos.yaml >/dev/null
+          helm template cozyplane-kpr chart/cozyplane-kpr \
+            -f chart/cozyplane-kpr/values.yaml -f chart/cozyplane-kpr/values-talos.yaml >/dev/null
+          helm template cozyplane-apiserver chart/cozyplane-apiserver \
+            -f chart/cozyplane-apiserver/values.yaml >/dev/null
+          helm template cozyplane-cilium-crds chart/cozyplane-cilium-crds >/dev/null
+
+      # The agent and the aggregated apiserver are two binaries in ONE image, so
+      # a split pin quietly ships two different builds of the same tree.
+      - name: image pins agree
+        run: |
+          a=$(helm show values chart/cozyplane | yq '.image')
+          b=$(helm show values chart/cozyplane-apiserver | yq '.image')
+          [ "$a" = "$b" ] || { echo "pin drift: $a != $b" >&2; exit 1; }
 
   # The compiled eBPF object (datapath/overlay_bpfel.*) is committed and embedded
   # via go:embed. Regenerate it from the runner's kernel BTF and flag drift. The
