@@ -35,7 +35,7 @@ func TestIsDelegatedIfName(t *testing.T) {
 		{"eth1", false},
 		{"netx", false}, // Multus numbers; a name is not a number
 		{"net1x", false},
-		{"pod4ef2736ef8", false},  // digest is too short
+		{"pod4ef2736ef8", false},   // digest is too short
 		{"pod4ef2736ef84a", false}, // digest is too long
 		{"pod4EF2736ef84", false},  // KubeVirt emits lowercase hex
 		{"pod4ef2736ef8x", false},  // non-hex digest
