@@ -1,0 +1,23 @@
+apiVersion: v2
+name: cozyplane-cilium-crds
+description: |
+  The cilium.io/v2 CiliumNetworkPolicy + CiliumClusterwideNetworkPolicy CRDs,
+  shipped INERT for the cozyplane networking variant. Stock Cozystack components
+  (linstor/blockstor, tenant, monitoring-agents, fluxcd-operator, ...) embed
+  these policy objects and fail to install if the CRDs are absent. cozyplane
+  runs no Cilium, so nothing enforces them — cozyplane's own policy layers
+  (NetworkPolicy, HostFirewall, SecurityGroup — docs/policy-layers.md) are
+  separate kinds. The CRDs exist only so those stock manifests apply.
+type: application
+# Unused as a release coordinate: these charts are consumed straight from this
+# git repository (packages/packagesources/, GitRepository -> PackageSource), so
+# the commit is the version and nothing resolves this field. Kept at 0.0.0.
+version: 0.0.0
+kubeVersion: ">=1.30.0-0"
+keywords:
+  - cilium
+  - crds
+  - cozystack
+home: https://github.com/lllamnyp/cozyplane
+sources:
+  - https://github.com/lllamnyp/cozyplane

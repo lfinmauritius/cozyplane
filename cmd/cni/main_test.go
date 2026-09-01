@@ -398,7 +398,9 @@ func TestReleaseFabricIPsRunsAfterTheOperationContextDied(t *testing.T) {
 		t.Fatal("cleanup context has no deadline: a rollback could hang forever")
 	}
 
-	releaseFabricIPs(cctx, client, "uid-1")
+	if err := releaseFabricIPs(cctx, client, "uid-1"); err != nil {
+		t.Fatalf("release fabric IPs: %v", err)
+	}
 
 	if len(issued) != 1 {
 		t.Fatalf("release issued %d delete-collection calls against a dead parent, want 1", len(issued))

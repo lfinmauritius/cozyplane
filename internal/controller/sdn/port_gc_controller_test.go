@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
 )
@@ -149,5 +150,30 @@ func TestPortGCReapsAbandonedClaims(t *testing.T) {
 		} else if !got.DeletionTimestamp.IsZero() {
 			t.Errorf("%s: should be kept, but is terminating", name)
 		}
+	}
+}
+
+// The auxiliary Node/Pod watches want one signal — the object going away.
+// Without this predicate a Node heartbeat (one per node every few seconds) ran
+// mapNodeToPorts, which lists every Port in the cluster, for an event that can
+// never change the verdict.
+func TestDeletionsOnlyAdmitsOnlyDeletes(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
+	heartbeat := node.DeepCopy()
+	heartbeat.Status.Conditions = []corev1.NodeCondition{
+		{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+	}
+
+	if deletionsOnly.Create(event.CreateEvent{Object: node}) {
+		t.Error("an Add must not re-enqueue every Port")
+	}
+	if deletionsOnly.Update(event.UpdateEvent{ObjectOld: node, ObjectNew: heartbeat}) {
+		t.Error("a node heartbeat must not re-enqueue every Port")
+	}
+	if deletionsOnly.Generic(event.GenericEvent{Object: node}) {
+		t.Error("a generic event must not re-enqueue every Port")
+	}
+	if !deletionsOnly.Delete(event.DeleteEvent{Object: node}) {
+		t.Error("a deletion is the signal this watch exists for")
 	}
 }

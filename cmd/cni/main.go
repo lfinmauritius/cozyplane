@@ -302,9 +302,15 @@ func addDefault(ctx context.Context, args *skel.CmdArgs, conf *NetConf) (result 
 	}
 	defer func() {
 		if err != nil {
+			// Surface a failed release in the ADD error itself: it becomes the
+			// FailedCreatePodSandBox event, which is the only place an operator
+			// would ever see that kubelet's retries are burning addresses.
 			cctx, ccancel := cleanupContext(ctx)
 			defer ccancel()
-			releaseFabricIPs(cctx, lc, podUID)
+			if rerr := releaseFabricIPs(cctx, lc, podUID); rerr != nil {
+				err = fmt.Errorf("%w (releasing the fabric IP claim also failed: %v — "+
+					"the address leaks until the pod is deleted)", err, rerr)
+			}
 		}
 	}()
 
@@ -419,9 +425,15 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 	}
 	defer func() {
 		if err != nil {
+			// Surface a failed release in the ADD error itself: it becomes the
+			// FailedCreatePodSandBox event, which is the only place an operator
+			// would ever see that kubelet's retries are burning addresses.
 			cctx, ccancel := cleanupContext(ctx)
 			defer ccancel()
-			releaseFabricIPs(cctx, lc, podUID)
+			if rerr := releaseFabricIPs(cctx, lc, podUID); rerr != nil {
+				err = fmt.Errorf("%w (releasing the fabric IP claim also failed: %v — "+
+					"the address leaks until the pod is deleted)", err, rerr)
+			}
 		}
 	}()
 	fabricIP := fabricIPs[0]
@@ -838,9 +850,12 @@ func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAt
 			}
 			// Re-point the Port's pod identity at the pod binding it NOW. The
 			// {IP, MAC} stay pinned — that is the whole point of a persistent
-			// Port — but membership must follow the live launcher, or a migrated
-			// VM's SecurityGroup membership would freeze at its original labels
-			// (docs/security-groups.md § Membership). Best-effort.
+			// Port — but membership must follow the live launcher, not the
+			// first one that ever claimed it, or a migrated VM's SecurityGroup
+			// membership would freeze at its original labels
+			// (docs/security-groups.md § Membership). Best-effort: a failure
+			// here must not fail the ADD, and the controller still has the
+			// snapshot to fall back on.
 			if err := rebindPodIdentity(ctx, client, p, podNS, podName, podUID, podLabels); err != nil {
 				fmt.Fprintf(os.Stderr, "cozyplane: rebind pod identity on %s: %v\n", p.Name, err)
 			}
@@ -1297,7 +1312,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	// Keyed on pod UID, so a reused pod name cannot reap the new pod's address.
 	if podUID != "" {
 		if lc, e := localClient(); e == nil {
-			releaseFabricIPs(ctx, lc, podUID)
+			_ = releaseFabricIPs(ctx, lc, podUID)
 		}
 	}
 
