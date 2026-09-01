@@ -371,12 +371,23 @@ struct gw_entry {
 	__u32 pad;
 };
 
+#define ROUTE_NH_MAX 2
+
+// A route may carry two active next-hops. The bounded array keeps the map ABI
+// verifier-friendly while covering the HA contract; count is one for every
+// ordinary route and two for active-active VPN ECMP.
+struct route_entry {
+	struct gw_entry next_hops[ROUTE_NH_MAX];
+	__u8 count;
+	__u8 pad[7];
+};
+
 // gateways: network id -> egress gateway. Off-VPC traffic from a pod in the
 // network is delivered to the gateway instead of being dropped.
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, __u32);
-	__type(value, struct gw_entry);
+	__type(value, struct route_entry);
 	__uint(max_entries, 1024);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } gateways SEC(".maps");
@@ -1905,7 +1916,7 @@ static __always_inline __u32 *remote_of(__u32 scope, struct addr128 addr)
 // (vpc_routes): the longest-prefix next-hop for `addr` in `scope`, or NULL for
 // no route (fall through to NAT/gateway). LPM, so a fully-specified query key
 // matches the widest covering prefix.
-static __always_inline struct gw_entry *route_of(__u32 scope, struct addr128 addr)
+static __always_inline struct route_entry *route_of(__u32 scope, struct addr128 addr)
 {
 	struct lpm_key key = { .prefixlen = LPM_FULL, .scope_net = scope, .addr = addr };
 	return bpf_map_lookup_elem(&vpc_routes, &key);
@@ -2015,6 +2026,24 @@ static __always_inline int parse_ip(struct __sk_buff *skb, struct pkt *p)
 		return 0;
 	}
 	return -1;
+}
+
+// route_next_hop picks one active next-hop from the immutable inner packet.
+// The hash deliberately does not depend on skb metadata so source and
+// destination nodes make the same decision before and after Geneve.
+static __always_inline struct gw_entry *route_next_hop(struct route_entry *route, const struct pkt *p)
+{
+	if (!route || route->count == 0 || route->count > ROUTE_NH_MAX)
+		return NULL;
+	__u32 src, dst;
+	__builtin_memcpy(&src, &p->src.b[12], sizeof(src));
+	__builtin_memcpy(&dst, &p->dst.b[12], sizeof(dst));
+	__u32 hash = src ^ (dst << 1) ^ p->proto;
+	hash *= 2654435761u;
+	hash ^= hash >> 16;
+	if (route->count == 1 || !(hash & 1))
+		return &route->next_hops[0];
+	return &route->next_hops[1];
 }
 
 // deliver_local redirects the frame into a local pod's veth (through to_pod).
@@ -5011,7 +5040,8 @@ int cozyplane_from_pod(struct __sk_buff *skb)
 	// delivered to the next-hop Port by identity (deliver_local / encap), the
 	// same delivery as gateways[vni]. A miss falls through to NAT/gateway.
 	if (srcnet && !dstnet && !is_gw) {
-		struct gw_entry *rt = route_of(srcnet, p.dst);
+		struct route_entry *route = route_of(srcnet, p.dst);
+		struct gw_entry *rt = route_next_hop(route, &p);
 		if (rt) {
 			if (!ns_egress_ok(skb, srcnet, p.is_v6, p.proto, p.src, p.dst)) {
 				return TC_ACT_SHOT;
@@ -5605,7 +5635,8 @@ int cozyplane_from_overlay(struct __sk_buff *skb)
 	// encap'd routed traffic (its destination a remote prefix, not a local pod)
 	// toward this node under the VPC's VNI. Deliver it to the appliance leg the
 	// route names. Mirrors the gateways lookup above.
-	struct gw_entry *rt = route_of(vni, p.dst);
+	struct route_entry *route = route_of(vni, p.dst);
+	struct gw_entry *rt = route_next_hop(route, &p);
 	if (rt && !rt->node_ip) {
 		struct endpoint *rep = local_of(vni, rt->gw_ip);
 		if (rep)

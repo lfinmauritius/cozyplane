@@ -19,6 +19,8 @@ package vpngateway
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
 	"k8s.io/apimachinery/pkg/fields"
@@ -81,7 +83,7 @@ func (vpnGatewayStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime
 }
 
 func (vpnGatewayStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	return validateVPNGateway(obj.(*sdn.VPNGateway))
 }
 
 // WarningsOnCreate returns warnings for the creation of the given object.
@@ -101,7 +103,136 @@ func (vpnGatewayStrategy) Canonicalize(obj runtime.Object) {
 }
 
 func (vpnGatewayStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	return validateVPNGateway(obj.(*sdn.VPNGateway))
+}
+
+func validateVPNGateway(gw *sdn.VPNGateway) field.ErrorList {
+	var errs field.ErrorList
+	specPath := field.NewPath("spec")
+	if gw.Spec.VPCRef.Name == "" {
+		errs = append(errs, field.Required(specPath.Child("vpcRef", "name"), "VPC name is required"))
+	}
+	backends := 0
+	if gw.Spec.WireGuard != nil {
+		backends++
+	}
+	if gw.Spec.IPsec != nil {
+		backends++
+	}
+	if backends > 1 {
+		errs = append(errs, field.Invalid(specPath, gw.Spec, "wireGuard and ipsec are mutually exclusive"))
+	}
+	haPath := specPath.Child("ha")
+	if gw.Spec.HighAvailability && gw.Spec.HA != nil {
+		errs = append(errs, field.Invalid(haPath, gw.Spec.HA,
+			"ha and the legacy highAvailability flag are mutually exclusive"))
+	}
+	if ha := gw.Spec.HA; ha != nil {
+		switch ha.Mode {
+		case sdn.VPNGatewayHAModeWarmStandby:
+			if ha.ActiveActive != nil || ha.VirtualMachine != nil {
+				errs = append(errs, field.Invalid(haPath, ha, "WarmStandby accepts no mode-specific configuration"))
+			}
+		case sdn.VPNGatewayHAModeActiveActive:
+			if ha.ActiveActive == nil {
+				errs = append(errs, field.Required(haPath.Child("activeActive"), "ActiveActive configuration is required"))
+			} else {
+				errs = append(errs, validateActiveActive(ha.ActiveActive, haPath.Child("activeActive"))...)
+			}
+			if ha.VirtualMachine != nil {
+				errs = append(errs, field.Forbidden(haPath.Child("virtualMachine"), "only valid with LiveMigration"))
+			}
+			claims := gw.Spec.ExternalAddress.AddressClaimNames
+			if gw.Spec.ExternalAddress.AddressClaimName != "" {
+				errs = append(errs, field.Forbidden(specPath.Child("externalAddress", "addressClaimName"),
+					"ActiveActive uses addressClaimNames"))
+			}
+			if len(claims) != 0 && len(claims) != 2 {
+				errs = append(errs, field.Invalid(specPath.Child("externalAddress", "addressClaimNames"), claims,
+					"must be empty for dynamic allocation or contain exactly two claims"))
+			}
+			if len(claims) == 2 && claims[0] == claims[1] {
+				errs = append(errs, field.Duplicate(specPath.Child("externalAddress", "addressClaimNames").Index(1), claims[1]))
+			}
+		case sdn.VPNGatewayHAModeLiveMigration:
+			if ha.VirtualMachine == nil {
+				errs = append(errs, field.Required(haPath.Child("virtualMachine"), "LiveMigration VM configuration is required"))
+			} else {
+				vmPath := haPath.Child("virtualMachine")
+				if ha.VirtualMachine.Image == "" {
+					errs = append(errs, field.Required(vmPath.Child("image"), "bootable containerDisk image is required"))
+				}
+				if ha.VirtualMachine.StateClaimName == "" {
+					errs = append(errs, field.Required(vmPath.Child("stateClaimName"), "RWX state PVC is required"))
+				}
+			}
+			if ha.ActiveActive != nil {
+				errs = append(errs, field.Forbidden(haPath.Child("activeActive"), "only valid with ActiveActive"))
+			}
+		default:
+			errs = append(errs, field.NotSupported(haPath.Child("mode"), ha.Mode, []string{
+				string(sdn.VPNGatewayHAModeWarmStandby), string(sdn.VPNGatewayHAModeLiveMigration), string(sdn.VPNGatewayHAModeActiveActive),
+			}))
+		}
+	}
+	if ipsec := gw.Spec.IPsec; ipsec != nil {
+		poolsPath := specPath.Child("ipsec", "addressPools")
+		names := map[string]int{}
+		parsed := make([]*net.IPNet, 0, len(ipsec.AddressPools))
+		for i, pool := range ipsec.AddressPools {
+			p := poolsPath.Index(i)
+			if pool.Name == "" {
+				errs = append(errs, field.Required(p.Child("name"), "pool name is required"))
+			} else if previous, exists := names[pool.Name]; exists {
+				errs = append(errs, field.Duplicate(p.Child("name"),
+					fmt.Sprintf("%s (already used at index %d)", pool.Name, previous)))
+			} else {
+				names[pool.Name] = i
+			}
+			_, network, err := net.ParseCIDR(pool.CIDR)
+			if err != nil {
+				errs = append(errs, field.Invalid(p.Child("cidr"), pool.CIDR, "must be a valid CIDR"))
+				continue
+			}
+			for j, other := range parsed {
+				if network.Contains(other.IP) || other.Contains(network.IP) {
+					errs = append(errs, field.Invalid(p.Child("cidr"), pool.CIDR,
+						fmt.Sprintf("overlaps addressPools[%d]", j)))
+				}
+			}
+			parsed = append(parsed, network)
+			for j, dns := range pool.DNS {
+				if net.ParseIP(dns) == nil {
+					errs = append(errs, field.Invalid(p.Child("dns").Index(j), dns, "must be an IP address"))
+				}
+			}
+		}
+		if len(ipsec.AddressPools) > 0 && ipsec.CredentialSecretRef == "" {
+			errs = append(errs, field.Required(specPath.Child("ipsec", "credentialSecretRef"),
+				"roadwarrior pools require a gateway TLS credential"))
+		}
+	}
+	return errs
+}
+
+func validateActiveActive(aa *sdn.VPNGatewayActiveActive, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	const maxASN = int64(4294967295)
+	if aa.LocalASN < 1 || aa.LocalASN > maxASN {
+		errs = append(errs, field.Invalid(path.Child("localASN"), aa.LocalASN, "must be between 1 and 4294967295"))
+	}
+	if aa.PeerASN < 1 || aa.PeerASN > maxASN {
+		errs = append(errs, field.Invalid(path.Child("peerASN"), aa.PeerASN, "must be between 1 and 4294967295"))
+	}
+	if len(aa.PeerAddresses) == 0 {
+		errs = append(errs, field.Required(path.Child("peerAddresses"), "at least one BGP neighbor is required"))
+	}
+	for i, address := range aa.PeerAddresses {
+		if net.ParseIP(address) == nil {
+			errs = append(errs, field.Invalid(path.Child("peerAddresses").Index(i), address, "must be an IP address"))
+		}
+	}
+	return errs
 }
 
 // WarningsOnUpdate returns warnings for the given update.

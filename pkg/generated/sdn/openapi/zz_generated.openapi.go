@@ -32,130 +32,136 @@ import (
 
 func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
 	return map[string]common.OpenAPIDefinition{
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.FloatingIP":              schema_cozyplane_api_sdn_v1alpha1_FloatingIP(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.FloatingIPList":          schema_cozyplane_api_sdn_v1alpha1_FloatingIPList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.FloatingIPSpec":          schema_cozyplane_api_sdn_v1alpha1_FloatingIPSpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.FloatingIPStatus":        schema_cozyplane_api_sdn_v1alpha1_FloatingIPStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewall":            schema_cozyplane_api_sdn_v1alpha1_HostFirewall(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallEgressRule":  schema_cozyplane_api_sdn_v1alpha1_HostFirewallEgressRule(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallList":        schema_cozyplane_api_sdn_v1alpha1_HostFirewallList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallPeer":        schema_cozyplane_api_sdn_v1alpha1_HostFirewallPeer(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallPort":        schema_cozyplane_api_sdn_v1alpha1_HostFirewallPort(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallRule":        schema_cozyplane_api_sdn_v1alpha1_HostFirewallRule(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallSpec":        schema_cozyplane_api_sdn_v1alpha1_HostFirewallSpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallStatus":      schema_cozyplane_api_sdn_v1alpha1_HostFirewallStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef":             schema_cozyplane_api_sdn_v1alpha1_LocalVPCRef(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPNGatewayRef":      schema_cozyplane_api_sdn_v1alpha1_LocalVPNGatewayRef(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.Port":                    schema_cozyplane_api_sdn_v1alpha1_Port(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.PortList":                schema_cozyplane_api_sdn_v1alpha1_PortList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.PortSpec":                schema_cozyplane_api_sdn_v1alpha1_PortSpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.PortStatus":              schema_cozyplane_api_sdn_v1alpha1_PortStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroup":           schema_cozyplane_api_sdn_v1alpha1_SecurityGroup(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupEgressRule": schema_cozyplane_api_sdn_v1alpha1_SecurityGroupEgressRule(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupList":       schema_cozyplane_api_sdn_v1alpha1_SecurityGroupList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupPeer":       schema_cozyplane_api_sdn_v1alpha1_SecurityGroupPeer(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupPort":       schema_cozyplane_api_sdn_v1alpha1_SecurityGroupPort(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupRule":       schema_cozyplane_api_sdn_v1alpha1_SecurityGroupRule(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupSpec":       schema_cozyplane_api_sdn_v1alpha1_SecurityGroupSpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupStatus":     schema_cozyplane_api_sdn_v1alpha1_SecurityGroupStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceRef":              schema_cozyplane_api_sdn_v1alpha1_ServiceRef(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceVIP":              schema_cozyplane_api_sdn_v1alpha1_ServiceVIP(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceVIPList":          schema_cozyplane_api_sdn_v1alpha1_ServiceVIPList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceVIPSpec":          schema_cozyplane_api_sdn_v1alpha1_ServiceVIPSpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceVIPStatus":        schema_cozyplane_api_sdn_v1alpha1_ServiceVIPStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VIPBackend":              schema_cozyplane_api_sdn_v1alpha1_VIPBackend(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VIPBackendPort":          schema_cozyplane_api_sdn_v1alpha1_VIPBackendPort(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VIPPort":                 schema_cozyplane_api_sdn_v1alpha1_VIPPort(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPC":                     schema_cozyplane_api_sdn_v1alpha1_VPC(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCBinding":              schema_cozyplane_api_sdn_v1alpha1_VPCBinding(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCBindingList":          schema_cozyplane_api_sdn_v1alpha1_VPCBindingList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCBindingSpec":          schema_cozyplane_api_sdn_v1alpha1_VPCBindingSpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGateway":              schema_cozyplane_api_sdn_v1alpha1_VPCGateway(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayAppliance":     schema_cozyplane_api_sdn_v1alpha1_VPCGatewayAppliance(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayIngress":       schema_cozyplane_api_sdn_v1alpha1_VPCGatewayIngress(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayList":          schema_cozyplane_api_sdn_v1alpha1_VPCGatewayList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayNAT":           schema_cozyplane_api_sdn_v1alpha1_VPCGatewayNAT(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRoute":         schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRoute(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRouteStatus":   schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRouteStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewaySpec":          schema_cozyplane_api_sdn_v1alpha1_VPCGatewaySpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayStatus":        schema_cozyplane_api_sdn_v1alpha1_VPCGatewayStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayVia":           schema_cozyplane_api_sdn_v1alpha1_VPCGatewayVia(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCList":                 schema_cozyplane_api_sdn_v1alpha1_VPCList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeering":              schema_cozyplane_api_sdn_v1alpha1_VPCPeering(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeeringList":          schema_cozyplane_api_sdn_v1alpha1_VPCPeeringList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeeringSpec":          schema_cozyplane_api_sdn_v1alpha1_VPCPeeringSpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeeringStatus":        schema_cozyplane_api_sdn_v1alpha1_VPCPeeringStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCRef":                  schema_cozyplane_api_sdn_v1alpha1_VPCRef(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCSpec":                 schema_cozyplane_api_sdn_v1alpha1_VPCSpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCStatus":               schema_cozyplane_api_sdn_v1alpha1_VPCStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnection":           schema_cozyplane_api_sdn_v1alpha1_VPNConnection(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsec":      schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsecAuth":  schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsecAuth(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionList":       schema_cozyplane_api_sdn_v1alpha1_VPNConnectionList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionSpec":       schema_cozyplane_api_sdn_v1alpha1_VPNConnectionSpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionStatus":     schema_cozyplane_api_sdn_v1alpha1_VPNConnectionStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionWireGuard":  schema_cozyplane_api_sdn_v1alpha1_VPNConnectionWireGuard(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNExternalAddress":      schema_cozyplane_api_sdn_v1alpha1_VPNExternalAddress(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGateway":              schema_cozyplane_api_sdn_v1alpha1_VPNGateway(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayIPsec":         schema_cozyplane_api_sdn_v1alpha1_VPNGatewayIPsec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayList":          schema_cozyplane_api_sdn_v1alpha1_VPNGatewayList(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewaySpec":          schema_cozyplane_api_sdn_v1alpha1_VPNGatewaySpec(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayStatus":        schema_cozyplane_api_sdn_v1alpha1_VPNGatewayStatus(ref),
-		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayWireGuard":     schema_cozyplane_api_sdn_v1alpha1_VPNGatewayWireGuard(ref),
-		resource.Quantity{}.OpenAPIModelName():                                   schema_apimachinery_pkg_api_resource_Quantity(ref),
-		v1.APIGroup{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_APIGroup(ref),
-		v1.APIGroupList{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_APIGroupList(ref),
-		v1.APIResource{}.OpenAPIModelName():                                      schema_pkg_apis_meta_v1_APIResource(ref),
-		v1.APIResourceList{}.OpenAPIModelName():                                  schema_pkg_apis_meta_v1_APIResourceList(ref),
-		v1.APIVersions{}.OpenAPIModelName():                                      schema_pkg_apis_meta_v1_APIVersions(ref),
-		v1.ApplyOptions{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_ApplyOptions(ref),
-		v1.Condition{}.OpenAPIModelName():                                        schema_pkg_apis_meta_v1_Condition(ref),
-		v1.CreateOptions{}.OpenAPIModelName():                                    schema_pkg_apis_meta_v1_CreateOptions(ref),
-		v1.DeleteOptions{}.OpenAPIModelName():                                    schema_pkg_apis_meta_v1_DeleteOptions(ref),
-		v1.Duration{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_Duration(ref),
-		v1.FieldSelectorRequirement{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_FieldSelectorRequirement(ref),
-		v1.FieldsV1{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_FieldsV1(ref),
-		v1.GetOptions{}.OpenAPIModelName():                                       schema_pkg_apis_meta_v1_GetOptions(ref),
-		v1.GroupKind{}.OpenAPIModelName():                                        schema_pkg_apis_meta_v1_GroupKind(ref),
-		v1.GroupResource{}.OpenAPIModelName():                                    schema_pkg_apis_meta_v1_GroupResource(ref),
-		v1.GroupVersion{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_GroupVersion(ref),
-		v1.GroupVersionForDiscovery{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_GroupVersionForDiscovery(ref),
-		v1.GroupVersionKind{}.OpenAPIModelName():                                 schema_pkg_apis_meta_v1_GroupVersionKind(ref),
-		v1.GroupVersionResource{}.OpenAPIModelName():                             schema_pkg_apis_meta_v1_GroupVersionResource(ref),
-		v1.InternalEvent{}.OpenAPIModelName():                                    schema_pkg_apis_meta_v1_InternalEvent(ref),
-		v1.LabelSelector{}.OpenAPIModelName():                                    schema_pkg_apis_meta_v1_LabelSelector(ref),
-		v1.LabelSelectorRequirement{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_LabelSelectorRequirement(ref),
-		v1.List{}.OpenAPIModelName():                                             schema_pkg_apis_meta_v1_List(ref),
-		v1.ListMeta{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_ListMeta(ref),
-		v1.ListOptions{}.OpenAPIModelName():                                      schema_pkg_apis_meta_v1_ListOptions(ref),
-		v1.ManagedFieldsEntry{}.OpenAPIModelName():                               schema_pkg_apis_meta_v1_ManagedFieldsEntry(ref),
-		v1.MicroTime{}.OpenAPIModelName():                                        schema_pkg_apis_meta_v1_MicroTime(ref),
-		v1.ObjectMeta{}.OpenAPIModelName():                                       schema_pkg_apis_meta_v1_ObjectMeta(ref),
-		v1.OwnerReference{}.OpenAPIModelName():                                   schema_pkg_apis_meta_v1_OwnerReference(ref),
-		v1.PartialObjectMetadata{}.OpenAPIModelName():                            schema_pkg_apis_meta_v1_PartialObjectMetadata(ref),
-		v1.PartialObjectMetadataList{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_PartialObjectMetadataList(ref),
-		v1.Patch{}.OpenAPIModelName():                                            schema_pkg_apis_meta_v1_Patch(ref),
-		v1.PatchOptions{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_PatchOptions(ref),
-		v1.Preconditions{}.OpenAPIModelName():                                    schema_pkg_apis_meta_v1_Preconditions(ref),
-		v1.RootPaths{}.OpenAPIModelName():                                        schema_pkg_apis_meta_v1_RootPaths(ref),
-		v1.ServerAddressByClientCIDR{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_ServerAddressByClientCIDR(ref),
-		v1.Status{}.OpenAPIModelName():                                           schema_pkg_apis_meta_v1_Status(ref),
-		v1.StatusCause{}.OpenAPIModelName():                                      schema_pkg_apis_meta_v1_StatusCause(ref),
-		v1.StatusDetails{}.OpenAPIModelName():                                    schema_pkg_apis_meta_v1_StatusDetails(ref),
-		v1.Table{}.OpenAPIModelName():                                            schema_pkg_apis_meta_v1_Table(ref),
-		v1.TableColumnDefinition{}.OpenAPIModelName():                            schema_pkg_apis_meta_v1_TableColumnDefinition(ref),
-		v1.TableOptions{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_TableOptions(ref),
-		v1.TableRow{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_TableRow(ref),
-		v1.TableRowCondition{}.OpenAPIModelName():                                schema_pkg_apis_meta_v1_TableRowCondition(ref),
-		v1.Time{}.OpenAPIModelName():                                             schema_pkg_apis_meta_v1_Time(ref),
-		v1.Timestamp{}.OpenAPIModelName():                                        schema_pkg_apis_meta_v1_Timestamp(ref),
-		v1.TypeMeta{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_TypeMeta(ref),
-		v1.UpdateOptions{}.OpenAPIModelName():                                    schema_pkg_apis_meta_v1_UpdateOptions(ref),
-		v1.WatchEvent{}.OpenAPIModelName():                                       schema_pkg_apis_meta_v1_WatchEvent(ref),
-		runtime.RawExtension{}.OpenAPIModelName():                                schema_k8sio_apimachinery_pkg_runtime_RawExtension(ref),
-		runtime.TypeMeta{}.OpenAPIModelName():                                    schema_k8sio_apimachinery_pkg_runtime_TypeMeta(ref),
-		runtime.Unknown{}.OpenAPIModelName():                                     schema_k8sio_apimachinery_pkg_runtime_Unknown(ref),
-		version.Info{}.OpenAPIModelName():                                        schema_k8sio_apimachinery_pkg_version_Info(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.FloatingIP":               schema_cozyplane_api_sdn_v1alpha1_FloatingIP(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.FloatingIPList":           schema_cozyplane_api_sdn_v1alpha1_FloatingIPList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.FloatingIPSpec":           schema_cozyplane_api_sdn_v1alpha1_FloatingIPSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.FloatingIPStatus":         schema_cozyplane_api_sdn_v1alpha1_FloatingIPStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewall":             schema_cozyplane_api_sdn_v1alpha1_HostFirewall(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallEgressRule":   schema_cozyplane_api_sdn_v1alpha1_HostFirewallEgressRule(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallList":         schema_cozyplane_api_sdn_v1alpha1_HostFirewallList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallPeer":         schema_cozyplane_api_sdn_v1alpha1_HostFirewallPeer(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallPort":         schema_cozyplane_api_sdn_v1alpha1_HostFirewallPort(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallRule":         schema_cozyplane_api_sdn_v1alpha1_HostFirewallRule(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallSpec":         schema_cozyplane_api_sdn_v1alpha1_HostFirewallSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.HostFirewallStatus":       schema_cozyplane_api_sdn_v1alpha1_HostFirewallStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef":              schema_cozyplane_api_sdn_v1alpha1_LocalVPCRef(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPNGatewayRef":       schema_cozyplane_api_sdn_v1alpha1_LocalVPNGatewayRef(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.Port":                     schema_cozyplane_api_sdn_v1alpha1_Port(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.PortList":                 schema_cozyplane_api_sdn_v1alpha1_PortList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.PortSpec":                 schema_cozyplane_api_sdn_v1alpha1_PortSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.PortStatus":               schema_cozyplane_api_sdn_v1alpha1_PortStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroup":            schema_cozyplane_api_sdn_v1alpha1_SecurityGroup(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupEgressRule":  schema_cozyplane_api_sdn_v1alpha1_SecurityGroupEgressRule(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupList":        schema_cozyplane_api_sdn_v1alpha1_SecurityGroupList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupPeer":        schema_cozyplane_api_sdn_v1alpha1_SecurityGroupPeer(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupPort":        schema_cozyplane_api_sdn_v1alpha1_SecurityGroupPort(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupRule":        schema_cozyplane_api_sdn_v1alpha1_SecurityGroupRule(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupSpec":        schema_cozyplane_api_sdn_v1alpha1_SecurityGroupSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupStatus":      schema_cozyplane_api_sdn_v1alpha1_SecurityGroupStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceRef":               schema_cozyplane_api_sdn_v1alpha1_ServiceRef(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceVIP":               schema_cozyplane_api_sdn_v1alpha1_ServiceVIP(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceVIPList":           schema_cozyplane_api_sdn_v1alpha1_ServiceVIPList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceVIPSpec":           schema_cozyplane_api_sdn_v1alpha1_ServiceVIPSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.ServiceVIPStatus":         schema_cozyplane_api_sdn_v1alpha1_ServiceVIPStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VIPBackend":               schema_cozyplane_api_sdn_v1alpha1_VIPBackend(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VIPBackendPort":           schema_cozyplane_api_sdn_v1alpha1_VIPBackendPort(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VIPPort":                  schema_cozyplane_api_sdn_v1alpha1_VIPPort(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPC":                      schema_cozyplane_api_sdn_v1alpha1_VPC(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCBinding":               schema_cozyplane_api_sdn_v1alpha1_VPCBinding(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCBindingList":           schema_cozyplane_api_sdn_v1alpha1_VPCBindingList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCBindingSpec":           schema_cozyplane_api_sdn_v1alpha1_VPCBindingSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGateway":               schema_cozyplane_api_sdn_v1alpha1_VPCGateway(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayAppliance":      schema_cozyplane_api_sdn_v1alpha1_VPCGatewayAppliance(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayIngress":        schema_cozyplane_api_sdn_v1alpha1_VPCGatewayIngress(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayList":           schema_cozyplane_api_sdn_v1alpha1_VPCGatewayList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayNAT":            schema_cozyplane_api_sdn_v1alpha1_VPCGatewayNAT(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRoute":          schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRoute(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayRouteStatus":    schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRouteStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewaySpec":           schema_cozyplane_api_sdn_v1alpha1_VPCGatewaySpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayStatus":         schema_cozyplane_api_sdn_v1alpha1_VPCGatewayStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCGatewayVia":            schema_cozyplane_api_sdn_v1alpha1_VPCGatewayVia(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCList":                  schema_cozyplane_api_sdn_v1alpha1_VPCList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeering":               schema_cozyplane_api_sdn_v1alpha1_VPCPeering(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeeringList":           schema_cozyplane_api_sdn_v1alpha1_VPCPeeringList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeeringSpec":           schema_cozyplane_api_sdn_v1alpha1_VPCPeeringSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCPeeringStatus":         schema_cozyplane_api_sdn_v1alpha1_VPCPeeringStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCRef":                   schema_cozyplane_api_sdn_v1alpha1_VPCRef(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCSpec":                  schema_cozyplane_api_sdn_v1alpha1_VPCSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPCStatus":                schema_cozyplane_api_sdn_v1alpha1_VPCStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnection":            schema_cozyplane_api_sdn_v1alpha1_VPNConnection(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsec":       schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionIPsecAuth":   schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsecAuth(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionList":        schema_cozyplane_api_sdn_v1alpha1_VPNConnectionList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionSpec":        schema_cozyplane_api_sdn_v1alpha1_VPNConnectionSpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionStatus":      schema_cozyplane_api_sdn_v1alpha1_VPNConnectionStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNConnectionWireGuard":   schema_cozyplane_api_sdn_v1alpha1_VPNConnectionWireGuard(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNExternalAddress":       schema_cozyplane_api_sdn_v1alpha1_VPNExternalAddress(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGateway":               schema_cozyplane_api_sdn_v1alpha1_VPNGateway(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayActiveActive":   schema_cozyplane_api_sdn_v1alpha1_VPNGatewayActiveActive(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayHA":             schema_cozyplane_api_sdn_v1alpha1_VPNGatewayHA(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayIPsec":          schema_cozyplane_api_sdn_v1alpha1_VPNGatewayIPsec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayList":           schema_cozyplane_api_sdn_v1alpha1_VPNGatewayList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewaySpec":           schema_cozyplane_api_sdn_v1alpha1_VPNGatewaySpec(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayStatus":         schema_cozyplane_api_sdn_v1alpha1_VPNGatewayStatus(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayVirtualMachine": schema_cozyplane_api_sdn_v1alpha1_VPNGatewayVirtualMachine(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayWireGuard":      schema_cozyplane_api_sdn_v1alpha1_VPNGatewayWireGuard(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNIPsecAddressPool":      schema_cozyplane_api_sdn_v1alpha1_VPNIPsecAddressPool(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNIPsecCertificateAuth":  schema_cozyplane_api_sdn_v1alpha1_VPNIPsecCertificateAuth(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNIPsecEAPAuth":          schema_cozyplane_api_sdn_v1alpha1_VPNIPsecEAPAuth(ref),
+		resource.Quantity{}.OpenAPIModelName():                                    schema_apimachinery_pkg_api_resource_Quantity(ref),
+		v1.APIGroup{}.OpenAPIModelName():                                          schema_pkg_apis_meta_v1_APIGroup(ref),
+		v1.APIGroupList{}.OpenAPIModelName():                                      schema_pkg_apis_meta_v1_APIGroupList(ref),
+		v1.APIResource{}.OpenAPIModelName():                                       schema_pkg_apis_meta_v1_APIResource(ref),
+		v1.APIResourceList{}.OpenAPIModelName():                                   schema_pkg_apis_meta_v1_APIResourceList(ref),
+		v1.APIVersions{}.OpenAPIModelName():                                       schema_pkg_apis_meta_v1_APIVersions(ref),
+		v1.ApplyOptions{}.OpenAPIModelName():                                      schema_pkg_apis_meta_v1_ApplyOptions(ref),
+		v1.Condition{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_Condition(ref),
+		v1.CreateOptions{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_CreateOptions(ref),
+		v1.DeleteOptions{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_DeleteOptions(ref),
+		v1.Duration{}.OpenAPIModelName():                                          schema_pkg_apis_meta_v1_Duration(ref),
+		v1.FieldSelectorRequirement{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_FieldSelectorRequirement(ref),
+		v1.FieldsV1{}.OpenAPIModelName():                                          schema_pkg_apis_meta_v1_FieldsV1(ref),
+		v1.GetOptions{}.OpenAPIModelName():                                        schema_pkg_apis_meta_v1_GetOptions(ref),
+		v1.GroupKind{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_GroupKind(ref),
+		v1.GroupResource{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_GroupResource(ref),
+		v1.GroupVersion{}.OpenAPIModelName():                                      schema_pkg_apis_meta_v1_GroupVersion(ref),
+		v1.GroupVersionForDiscovery{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_GroupVersionForDiscovery(ref),
+		v1.GroupVersionKind{}.OpenAPIModelName():                                  schema_pkg_apis_meta_v1_GroupVersionKind(ref),
+		v1.GroupVersionResource{}.OpenAPIModelName():                              schema_pkg_apis_meta_v1_GroupVersionResource(ref),
+		v1.InternalEvent{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_InternalEvent(ref),
+		v1.LabelSelector{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_LabelSelector(ref),
+		v1.LabelSelectorRequirement{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_LabelSelectorRequirement(ref),
+		v1.List{}.OpenAPIModelName():                                              schema_pkg_apis_meta_v1_List(ref),
+		v1.ListMeta{}.OpenAPIModelName():                                          schema_pkg_apis_meta_v1_ListMeta(ref),
+		v1.ListOptions{}.OpenAPIModelName():                                       schema_pkg_apis_meta_v1_ListOptions(ref),
+		v1.ManagedFieldsEntry{}.OpenAPIModelName():                                schema_pkg_apis_meta_v1_ManagedFieldsEntry(ref),
+		v1.MicroTime{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_MicroTime(ref),
+		v1.ObjectMeta{}.OpenAPIModelName():                                        schema_pkg_apis_meta_v1_ObjectMeta(ref),
+		v1.OwnerReference{}.OpenAPIModelName():                                    schema_pkg_apis_meta_v1_OwnerReference(ref),
+		v1.PartialObjectMetadata{}.OpenAPIModelName():                             schema_pkg_apis_meta_v1_PartialObjectMetadata(ref),
+		v1.PartialObjectMetadataList{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_PartialObjectMetadataList(ref),
+		v1.Patch{}.OpenAPIModelName():                                             schema_pkg_apis_meta_v1_Patch(ref),
+		v1.PatchOptions{}.OpenAPIModelName():                                      schema_pkg_apis_meta_v1_PatchOptions(ref),
+		v1.Preconditions{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_Preconditions(ref),
+		v1.RootPaths{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_RootPaths(ref),
+		v1.ServerAddressByClientCIDR{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_ServerAddressByClientCIDR(ref),
+		v1.Status{}.OpenAPIModelName():                                            schema_pkg_apis_meta_v1_Status(ref),
+		v1.StatusCause{}.OpenAPIModelName():                                       schema_pkg_apis_meta_v1_StatusCause(ref),
+		v1.StatusDetails{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_StatusDetails(ref),
+		v1.Table{}.OpenAPIModelName():                                             schema_pkg_apis_meta_v1_Table(ref),
+		v1.TableColumnDefinition{}.OpenAPIModelName():                             schema_pkg_apis_meta_v1_TableColumnDefinition(ref),
+		v1.TableOptions{}.OpenAPIModelName():                                      schema_pkg_apis_meta_v1_TableOptions(ref),
+		v1.TableRow{}.OpenAPIModelName():                                          schema_pkg_apis_meta_v1_TableRow(ref),
+		v1.TableRowCondition{}.OpenAPIModelName():                                 schema_pkg_apis_meta_v1_TableRowCondition(ref),
+		v1.Time{}.OpenAPIModelName():                                              schema_pkg_apis_meta_v1_Time(ref),
+		v1.Timestamp{}.OpenAPIModelName():                                         schema_pkg_apis_meta_v1_Timestamp(ref),
+		v1.TypeMeta{}.OpenAPIModelName():                                          schema_pkg_apis_meta_v1_TypeMeta(ref),
+		v1.UpdateOptions{}.OpenAPIModelName():                                     schema_pkg_apis_meta_v1_UpdateOptions(ref),
+		v1.WatchEvent{}.OpenAPIModelName():                                        schema_pkg_apis_meta_v1_WatchEvent(ref),
+		runtime.RawExtension{}.OpenAPIModelName():                                 schema_k8sio_apimachinery_pkg_runtime_RawExtension(ref),
+		runtime.TypeMeta{}.OpenAPIModelName():                                     schema_k8sio_apimachinery_pkg_runtime_TypeMeta(ref),
+		runtime.Unknown{}.OpenAPIModelName():                                      schema_k8sio_apimachinery_pkg_runtime_Unknown(ref),
+		version.Info{}.OpenAPIModelName():                                         schema_k8sio_apimachinery_pkg_version_Info(ref),
 	}
 }
 
@@ -2109,6 +2115,21 @@ func schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRouteStatus(ref common.Referenc
 							Format:      "",
 						},
 					},
+					"ports": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Ports are ECMP next-hops for this prefix. Port remains the first entry for additive compatibility with single-next-hop agents.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 				},
 				Required: []string{"cidrs"},
 			},
@@ -2691,6 +2712,11 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsec(ref common.ReferenceCa
 						},
 					},
 					"proposals": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
 							Description: "Proposals overrides the gateway's default IKE/ESP proposals for this peer (strongSwan syntax). Empty inherits the gateway default.",
 							Type:        []string{"array"},
@@ -2712,6 +2738,20 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsec(ref common.ReferenceCa
 							Format:      "int32",
 						},
 					},
+					"startAction": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StartAction selects whether this side actively initiates IKE. When unset, the compatibility default is Start if peerAddress is set and None for a responder without a peerAddress.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"addressPool": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AddressPool selects a named pool on the gateway for a roadwarrior client. It is valid with certificate or EAP authentication and makes the connection responder-only.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"auth"},
 			},
@@ -2725,7 +2765,7 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsecAuth(ref common.Referen
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "VPNConnectionIPsecAuth configures IPsec peer authentication. PSK first; cert auth is a later increment.",
+				Description: "VPNConnectionIPsecAuth configures IPsec peer authentication. Exactly one of PSKSecretRef, Certificate, or EAP is selected.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"pskSecretRef": {
@@ -2735,9 +2775,23 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsecAuth(ref common.Referen
 							Format:      "",
 						},
 					},
+					"certificate": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Certificate authenticates a remote peer with a certificate issued by the gateway's configured trusted CA.",
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNIPsecCertificateAuth"),
+						},
+					},
+					"eap": {
+						SchemaProps: spec.SchemaProps{
+							Description: "EAP authenticates one roadwarrior identity using a password Secret.",
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNIPsecEAPAuth"),
+						},
+					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNIPsecCertificateAuth", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNIPsecEAPAuth"},
 	}
 }
 
@@ -2805,6 +2859,11 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionSpec(ref common.ReferenceCal
 						},
 					},
 					"remoteCIDRs": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
 							Description: "RemoteCIDRs are the remote networks reachable over this tunnel — routed into the VPC toward the gateway and admitted as the gateway's scoped forwarding sources.",
 							Type:        []string{"array"},
@@ -2860,7 +2919,41 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionStatus(ref common.ReferenceC
 							Ref:         ref(v1.Time{}.OpenAPIModelName()),
 						},
 					},
+					"observedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedAt is when the controller last obtained live tunnel state from the selected appliance. It stays empty while no appliance is reachable.",
+							Ref:         ref(v1.Time{}.OpenAPIModelName()),
+						},
+					},
+					"assignedAddresses": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "AssignedAddresses are the virtual IPs currently leased to this identity.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
 							Description: "Conditions is the detailed state.",
 							Type:        []string{"array"},
@@ -2891,10 +2984,29 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionWireGuard(ref common.Referen
 				Properties: map[string]spec.Schema{
 					"peerPublicKey": {
 						SchemaProps: spec.SchemaProps{
-							Description: "PeerPublicKey is the remote peer's WireGuard public key.",
-							Default:     "",
+							Description: "PeerPublicKey is the remote peer's WireGuard public key for a single tunnel. It is mutually exclusive with PeerPublicKeys.",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"peerPublicKeys": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "PeerPublicKeys are the two remote identities used by an active-active gateway, ordered by appliance ordinal.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
 						},
 					},
 					"peerEndpoint": {
@@ -2902,6 +3014,26 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionWireGuard(ref common.Referen
 							Description: "PeerEndpoint is the remote peer's host:port. Optional — a roaming peer may initiate, and WireGuard learns the endpoint from its handshake.",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"peerEndpoints": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "PeerEndpoints are the two remote host:port endpoints paired with PeerPublicKeys. Omit them for responder-only roaming peers.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
 						},
 					},
 					"presharedKeySecretRef": {
@@ -2919,7 +3051,6 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionWireGuard(ref common.Referen
 						},
 					},
 				},
-				Required: []string{"peerPublicKey"},
 			},
 		},
 	}
@@ -2944,6 +3075,26 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNExternalAddress(ref common.ReferenceCa
 							Description: "AddressClaimName names an IPAddressClaim reservation whose address the endpoint should wear. Reserving it matters for IPsec, whose remote peer pins the endpoint address (docs/vpn.md §3.2). Empty means dynamic.",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"addressClaimNames": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "AddressClaimNames reserves one stable endpoint per active-active appliance. It must contain exactly two distinct names in ActiveActive mode.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
 						},
 					},
 				},
@@ -2999,6 +3150,98 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGateway(ref common.ReferenceCallback) 
 	}
 }
 
+func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayActiveActive(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNGatewayActiveActive configures the remote dynamic-routing contract. FRR runs beside each tunnel appliance in the same network namespace.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"localASN": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LocalASN is the private or public ASN advertised by both appliances.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"peerASN": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PeerASN is the remote router's ASN.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"peerAddresses": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "PeerAddresses are BGP neighbor addresses reachable through the tunnels.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"bfd": {
+						SchemaProps: spec.SchemaProps{
+							Description: "BFD enables fast failure detection for every neighbor.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"localASN", "peerASN", "peerAddresses"},
+			},
+		},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayHA(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNGatewayHA configures one explicit HA tier.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"mode": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"activeActive": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ActiveActive is required with mode ActiveActive.",
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayActiveActive"),
+						},
+					},
+					"virtualMachine": {
+						SchemaProps: spec.SchemaProps{
+							Description: "VirtualMachine is required with mode LiveMigration.",
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayVirtualMachine"),
+						},
+					},
+				},
+				Required: []string{"mode"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayActiveActive", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayVirtualMachine"},
+	}
+}
+
 func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayIPsec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -3007,6 +3250,11 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayIPsec(ref common.ReferenceCallb
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"proposals": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
 							Description: "Proposals are the default IKE/ESP proposals for connections that do not set their own (strongSwan proposal syntax, e.g. \"aes256-sha256-modp2048\"). Empty lets charon negotiate its defaults.",
 							Type:        []string{"array"},
@@ -3021,9 +3269,54 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayIPsec(ref common.ReferenceCallb
 							},
 						},
 					},
+					"credentialSecretRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CredentialSecretRef names a cert-manager-compatible TLS Secret containing tls.crt and tls.key. ca.crt in the same Secret is accepted as the trust anchor when TrustedCASecretRef is empty.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"trustedCASecretRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TrustedCASecretRef names a Secret containing ca.crt used to authenticate certificate-based remote peers.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"localIdentity": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LocalIdentity is the IKE identity presented by the gateway. Empty lets strongSwan derive it from the selected certificate.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"addressPools": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "AddressPools are non-overlapping virtual-IP pools available to roadwarrior connections. A connection selects one by name.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNIPsecAddressPool"),
+									},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNIPsecAddressPool"},
 	}
 }
 
@@ -3116,12 +3409,18 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGatewaySpec(ref common.ReferenceCallba
 							Format:      "",
 						},
 					},
+					"ha": {
+						SchemaProps: spec.SchemaProps{
+							Description: "HA selects an explicit availability tier. When absent, highAvailability=true retains the legacy WarmStandby behavior.",
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayHA"),
+						},
+					},
 				},
 				Required: []string{"vpcRef"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNExternalAddress", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayIPsec", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayWireGuard"},
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNExternalAddress", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayHA", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayIPsec", "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.VPNGatewayWireGuard"},
 	}
 }
 
@@ -3139,11 +3438,51 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayStatus(ref common.ReferenceCall
 							Format:      "",
 						},
 					},
+					"addresses": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Addresses are all active public endpoints. Address remains the first entry for compatibility with single-endpoint clients.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 					"publicKey": {
 						SchemaProps: spec.SchemaProps{
 							Description: "PublicKey is the WireGuard public key of this gateway's endpoint, which the tenant configures the remote peer with. The private key stays in a Secret the appliance mounts; only the public half is surfaced.",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"publicKeys": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "PublicKeys are the WireGuard identities of all active-active endpoints. PublicKey remains the first entry for compatibility.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
 						},
 					},
 					"appliancePort": {
@@ -3153,7 +3492,32 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayStatus(ref common.ReferenceCall
 							Format:      "",
 						},
 					},
+					"appliancePorts": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "AppliancePorts are all ready route next-hops. AppliancePort remains the first entry for compatibility.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 					"routes": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
 							Description: "Routes reports the connections' remote CIDRs and the Port they are programmed toward, merged into the VPC route table by the agent (the same shape VPCGateway.status.routes uses).",
 							Type:        []string{"array"},
@@ -3175,6 +3539,14 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayStatus(ref common.ReferenceCall
 						},
 					},
 					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
 							Description: "Conditions is the detailed state.",
 							Type:        []string{"array"},
@@ -3196,6 +3568,42 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayStatus(ref common.ReferenceCall
 	}
 }
 
+func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayVirtualMachine(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNGatewayVirtualMachine configures the managed KubeVirt appliance form factor. The image must be a bootable containerDisk built from images/vpn-appliance.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"image": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"stateClaimName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StateClaimName is an existing RWX PVC used by both migration endpoints.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"cloudInitSecretRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CloudInitSecretRef optionally names operator-managed user data. Empty uses controller-generated cloud-init containing the current tunnel config.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"image", "stateClaimName"},
+			},
+		},
+	}
+}
+
 func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayWireGuard(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -3211,6 +3619,108 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGatewayWireGuard(ref common.ReferenceC
 						},
 					},
 				},
+			},
+		},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNIPsecAddressPool(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNIPsecAddressPool is a strongSwan-managed virtual-IP pool. Leases are identity-bound by strongSwan and disappear when the corresponding VPNConnection credential is revoked.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is unique within the gateway.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"cidr": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CIDR is the address range allocated to clients and routed to the appliance.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"dns": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "DNS lists optional DNS servers pushed to clients.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"name", "cidr"},
+			},
+		},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNIPsecCertificateAuth(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNIPsecCertificateAuth identifies a certificate-authenticated remote peer.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"remoteIdentity": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RemoteIdentity is the exact IKE identity the client certificate must carry.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"remoteIdentity"},
+			},
+		},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_VPNIPsecEAPAuth(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VPNIPsecEAPAuth configures one revocable EAP identity.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"identity": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Identity is the exact EAP identity accepted for this connection.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"secretRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "SecretRef names a Secret containing the EAP password under \"password\" or \"eap\", or as its sole data entry.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"identity", "secretRef"},
 			},
 		},
 	}

@@ -21,12 +21,17 @@ package v1alpha1
 // VPNConnectionIPsecAuthApplyConfiguration represents a declarative configuration of the VPNConnectionIPsecAuth type for use
 // with apply.
 //
-// VPNConnectionIPsecAuth configures IPsec peer authentication. PSK first; cert
-// auth is a later increment.
+// VPNConnectionIPsecAuth configures IPsec peer authentication. Exactly one of
+// PSKSecretRef, Certificate, or EAP is selected.
 type VPNConnectionIPsecAuthApplyConfiguration struct {
 	// PSKSecretRef names a Secret in this namespace holding the pre-shared key
 	// (conventional data key "psk", or the Secret's sole entry).
 	PSKSecretRef *string `json:"pskSecretRef,omitempty"`
+	// Certificate authenticates a remote peer with a certificate issued by the
+	// gateway's configured trusted CA.
+	Certificate *VPNIPsecCertificateAuthApplyConfiguration `json:"certificate,omitempty"`
+	// EAP authenticates one roadwarrior identity using a password Secret.
+	EAP *VPNIPsecEAPAuthApplyConfiguration `json:"eap,omitempty"`
 }
 
 // VPNConnectionIPsecAuthApplyConfiguration constructs a declarative configuration of the VPNConnectionIPsecAuth type for use with
@@ -40,5 +45,21 @@ func VPNConnectionIPsecAuth() *VPNConnectionIPsecAuthApplyConfiguration {
 // If called multiple times, the PSKSecretRef field is set to the value of the last call.
 func (b *VPNConnectionIPsecAuthApplyConfiguration) WithPSKSecretRef(value string) *VPNConnectionIPsecAuthApplyConfiguration {
 	b.PSKSecretRef = &value
+	return b
+}
+
+// WithCertificate sets the Certificate field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Certificate field is set to the value of the last call.
+func (b *VPNConnectionIPsecAuthApplyConfiguration) WithCertificate(value *VPNIPsecCertificateAuthApplyConfiguration) *VPNConnectionIPsecAuthApplyConfiguration {
+	b.Certificate = value
+	return b
+}
+
+// WithEAP sets the EAP field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the EAP field is set to the value of the last call.
+func (b *VPNConnectionIPsecAuthApplyConfiguration) WithEAP(value *VPNIPsecEAPAuthApplyConfiguration) *VPNConnectionIPsecAuthApplyConfiguration {
+	b.EAP = value
 	return b
 }

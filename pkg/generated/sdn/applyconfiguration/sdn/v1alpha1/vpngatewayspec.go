@@ -40,6 +40,9 @@ type VPNGatewaySpecApplyConfiguration struct {
 	// FloatingIP and the route to the survivor. The crash-zero-drop tier
 	// (dual-tunnel + BGP) is a later increment.
 	HighAvailability *bool `json:"highAvailability,omitempty"`
+	// HA selects an explicit availability tier. When absent,
+	// highAvailability=true retains the legacy WarmStandby behavior.
+	HA *VPNGatewayHAApplyConfiguration `json:"ha,omitempty"`
 }
 
 // VPNGatewaySpecApplyConfiguration constructs a declarative configuration of the VPNGatewaySpec type for use with
@@ -85,5 +88,13 @@ func (b *VPNGatewaySpecApplyConfiguration) WithExternalAddress(value *VPNExterna
 // If called multiple times, the HighAvailability field is set to the value of the last call.
 func (b *VPNGatewaySpecApplyConfiguration) WithHighAvailability(value bool) *VPNGatewaySpecApplyConfiguration {
 	b.HighAvailability = &value
+	return b
+}
+
+// WithHA sets the HA field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the HA field is set to the value of the last call.
+func (b *VPNGatewaySpecApplyConfiguration) WithHA(value *VPNGatewayHAApplyConfiguration) *VPNGatewaySpecApplyConfiguration {
+	b.HA = value
 	return b
 }

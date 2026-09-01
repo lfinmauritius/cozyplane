@@ -140,6 +140,7 @@ type VPCGatewayStatus struct {
 type VPCGatewayRouteStatus struct {
 	CIDRs []string
 	Port  string
+	Ports []string
 }
 
 // VPCGatewayAppliance selects the tenant workload that serves as the VPC's door.
@@ -171,11 +172,37 @@ type VPCGatewayList struct {
 
 // VPNGatewayPhase is the lifecycle phase of a VPNGateway.
 type VPNGatewayPhase string
+type VPNGatewayHAMode string
 
 const (
 	VPNGatewayPhasePending VPNGatewayPhase = "Pending"
 	VPNGatewayPhaseReady   VPNGatewayPhase = "Ready"
 )
+
+const (
+	VPNGatewayHAModeWarmStandby   VPNGatewayHAMode = "WarmStandby"
+	VPNGatewayHAModeLiveMigration VPNGatewayHAMode = "LiveMigration"
+	VPNGatewayHAModeActiveActive  VPNGatewayHAMode = "ActiveActive"
+)
+
+type VPNGatewayActiveActive struct {
+	LocalASN      int64
+	PeerASN       int64
+	PeerAddresses []string
+	BFD           bool
+}
+
+type VPNGatewayVirtualMachine struct {
+	Image              string
+	StateClaimName     string
+	CloudInitSecretRef string
+}
+
+type VPNGatewayHA struct {
+	Mode           VPNGatewayHAMode
+	ActiveActive   *VPNGatewayActiveActive
+	VirtualMachine *VPNGatewayVirtualMachine
+}
 
 // VPNGatewayWireGuard configures a WireGuard tunnel endpoint.
 type VPNGatewayWireGuard struct {
@@ -184,13 +211,25 @@ type VPNGatewayWireGuard struct {
 
 // VPNGatewayIPsec configures an IKEv2/strongSwan tunnel endpoint.
 type VPNGatewayIPsec struct {
-	Proposals []string
+	Proposals           []string
+	CredentialSecretRef string
+	TrustedCASecretRef  string
+	LocalIdentity       string
+	AddressPools        []VPNIPsecAddressPool
+}
+
+// VPNIPsecAddressPool is a named virtual-IP pool for roadwarrior clients.
+type VPNIPsecAddressPool struct {
+	Name string
+	CIDR string
+	DNS  []string
 }
 
 // VPNExternalAddress selects the tunnel endpoint's external address.
 type VPNExternalAddress struct {
 	LoadBalancerClass string
 	AddressClaimName  string
+	AddressClaimNames []string
 }
 
 // VPNGatewaySpec declares a managed tunnel endpoint for a VPC (issue #6).
@@ -200,16 +239,20 @@ type VPNGatewaySpec struct {
 	IPsec            *VPNGatewayIPsec
 	ExternalAddress  VPNExternalAddress
 	HighAvailability bool
+	HA               *VPNGatewayHA
 }
 
 // VPNGatewayStatus is the observed state of a VPNGateway.
 type VPNGatewayStatus struct {
-	Address       string
-	PublicKey     string
-	AppliancePort string
-	Routes        []VPCGatewayRouteStatus
-	Phase         VPNGatewayPhase
-	Conditions    []metav1.Condition
+	Address        string
+	Addresses      []string
+	PublicKey      string
+	PublicKeys     []string
+	AppliancePort  string
+	AppliancePorts []string
+	Routes         []VPCGatewayRouteStatus
+	Phase          VPNGatewayPhase
+	Conditions     []metav1.Condition
 }
 
 // +genclient
@@ -239,6 +282,15 @@ type VPNConnectionPhase string
 const (
 	VPNConnectionPhasePending     VPNConnectionPhase = "Pending"
 	VPNConnectionPhaseEstablished VPNConnectionPhase = "Established"
+	VPNConnectionPhaseDown        VPNConnectionPhase = "Down"
+)
+
+// VPNIPsecStartAction controls whether this side initiates IKE.
+type VPNIPsecStartAction string
+
+const (
+	VPNIPsecStartActionStart VPNIPsecStartAction = "Start"
+	VPNIPsecStartActionNone  VPNIPsecStartAction = "None"
 )
 
 // LocalVPNGatewayRef references a VPNGateway in the same namespace.
@@ -249,14 +301,29 @@ type LocalVPNGatewayRef struct {
 // VPNConnectionWireGuard configures a WireGuard peer.
 type VPNConnectionWireGuard struct {
 	PeerPublicKey         string
+	PeerPublicKeys        []string
 	PeerEndpoint          string
+	PeerEndpoints         []string
 	PresharedKeySecretRef string
 	PersistentKeepalive   int32
 }
 
 // VPNConnectionIPsecAuth configures IPsec peer authentication.
+// VPNIPsecCertificateAuth identifies a certificate-authenticated remote peer.
+type VPNIPsecCertificateAuth struct {
+	RemoteIdentity string
+}
+
+// VPNIPsecEAPAuth configures one EAP identity and its password Secret.
+type VPNIPsecEAPAuth struct {
+	Identity  string
+	SecretRef string
+}
+
 type VPNConnectionIPsecAuth struct {
 	PSKSecretRef string
+	Certificate  *VPNIPsecCertificateAuth
+	EAP          *VPNIPsecEAPAuth
 }
 
 // VPNConnectionIPsec configures an IKEv2 peer.
@@ -265,6 +332,8 @@ type VPNConnectionIPsec struct {
 	Auth        VPNConnectionIPsecAuth
 	Proposals   []string
 	DPDDelay    int32
+	StartAction VPNIPsecStartAction
+	AddressPool string
 }
 
 // VPNConnectionSpec declares one tunnel to a remote site (issue #6).
@@ -277,9 +346,11 @@ type VPNConnectionSpec struct {
 
 // VPNConnectionStatus is the observed state of a VPNConnection.
 type VPNConnectionStatus struct {
-	Phase         VPNConnectionPhase
-	LastHandshake *metav1.Time
-	Conditions    []metav1.Condition
+	Phase             VPNConnectionPhase
+	LastHandshake     *metav1.Time
+	ObservedAt        *metav1.Time
+	AssignedAddresses []string
+	Conditions        []metav1.Condition
 }
 
 // +genclient

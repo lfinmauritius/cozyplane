@@ -142,14 +142,26 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &sdnv1alpha1.VPNExternalAddressApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("VPNGateway"):
 		return &sdnv1alpha1.VPNGatewayApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("VPNGatewayActiveActive"):
+		return &sdnv1alpha1.VPNGatewayActiveActiveApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("VPNGatewayHA"):
+		return &sdnv1alpha1.VPNGatewayHAApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("VPNGatewayIPsec"):
 		return &sdnv1alpha1.VPNGatewayIPsecApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("VPNGatewaySpec"):
 		return &sdnv1alpha1.VPNGatewaySpecApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("VPNGatewayStatus"):
 		return &sdnv1alpha1.VPNGatewayStatusApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("VPNGatewayVirtualMachine"):
+		return &sdnv1alpha1.VPNGatewayVirtualMachineApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("VPNGatewayWireGuard"):
 		return &sdnv1alpha1.VPNGatewayWireGuardApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("VPNIPsecAddressPool"):
+		return &sdnv1alpha1.VPNIPsecAddressPoolApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("VPNIPsecCertificateAuth"):
+		return &sdnv1alpha1.VPNIPsecCertificateAuthApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("VPNIPsecEAPAuth"):
+		return &sdnv1alpha1.VPNIPsecEAPAuthApplyConfiguration{}
 
 	}
 	return nil

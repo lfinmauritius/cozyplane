@@ -23,6 +23,7 @@ RUN CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /ou
     CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-gateway ./cmd/gateway && \
     CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-vpn-gateway ./cmd/vpn-gateway && \
     CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-vpn-gateway-ipsec ./cmd/vpn-gateway-ipsec && \
+    CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-vpn-routing ./cmd/vpn-routing && \
     CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-responder ./cmd/responder
 
 # Fetch the upstream host-local and loopback CNI plugins.
@@ -39,10 +40,10 @@ FROM debian:12-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90
 # --masquerade=iptables mode; the init container shells out to `cp` to install
 # plugins. strongswan + strongswan-swanctl provide charon and its VICI plugin —
 # the IPsec backend of the managed VPN appliance runs charon directly and drives
-# it over VICI. Timestamped apt byproducts (logs, caches) are removed in the same
-# layer so the layer content is reproducible (#4); file mtimes are normalized
-# by the release build's rewrite-timestamp.
-RUN apt-get update && apt-get install -y --no-install-recommends iptables strongswan strongswan-swanctl && \
+# it over VICI. The extra plugins provide EAP roadwarrior authentication; FRR is
+# the routing sidecar used by active-active gateways. Timestamped apt byproducts
+# are removed in the same layer so the layer content is reproducible (#4).
+RUN apt-get update && apt-get install -y --no-install-recommends iptables strongswan strongswan-swanctl libcharon-extra-plugins libcharon-extauth-plugins frr && \
     rm -rf /var/lib/apt/lists/* /var/log/dpkg.log /var/log/apt \
            /var/log/alternatives.log /var/cache/ldconfig/aux-cache
 COPY --from=build /out/cozyplane-agent /usr/local/bin/cozyplane-agent
@@ -51,6 +52,7 @@ COPY --from=build /out/cozyplane-apiserver /usr/local/bin/cozyplane-apiserver
 COPY --from=build /out/cozyplane-gateway /usr/local/bin/cozyplane-gateway
 COPY --from=build /out/cozyplane-vpn-gateway /usr/local/bin/cozyplane-vpn-gateway
 COPY --from=build /out/cozyplane-vpn-gateway-ipsec /usr/local/bin/cozyplane-vpn-gateway-ipsec
+COPY --from=build /out/cozyplane-vpn-routing /usr/local/bin/cozyplane-vpn-routing
 COPY --from=build /out/cozyplane-responder /usr/local/bin/cozyplane-responder
 COPY --from=build /out/cozyplane /opt/cni/bin/cozyplane
 COPY --from=cni /tmp/cni/bin/host-local /opt/cni/bin/host-local

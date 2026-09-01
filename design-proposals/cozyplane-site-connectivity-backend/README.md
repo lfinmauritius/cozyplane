@@ -3,7 +3,7 @@
 - **Title:** `cozyplane backend for tenant site connectivity (routed mode without kube-ovn)`
 - **Author(s):** `@lfinmauritius`
 - **Date:** `2026-08-25`
-- **Status:** Implemented (increments 0-3; HA/guardrails partial)
+- **Status:** Draft
 
 ## Overview
 

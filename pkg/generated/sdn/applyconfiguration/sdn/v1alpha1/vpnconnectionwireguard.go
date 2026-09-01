@@ -23,11 +23,18 @@ package v1alpha1
 //
 // VPNConnectionWireGuard configures a WireGuard peer.
 type VPNConnectionWireGuardApplyConfiguration struct {
-	// PeerPublicKey is the remote peer's WireGuard public key.
+	// PeerPublicKey is the remote peer's WireGuard public key for a single
+	// tunnel. It is mutually exclusive with PeerPublicKeys.
 	PeerPublicKey *string `json:"peerPublicKey,omitempty"`
+	// PeerPublicKeys are the two remote identities used by an active-active
+	// gateway, ordered by appliance ordinal.
+	PeerPublicKeys []string `json:"peerPublicKeys,omitempty"`
 	// PeerEndpoint is the remote peer's host:port. Optional — a roaming peer may
 	// initiate, and WireGuard learns the endpoint from its handshake.
 	PeerEndpoint *string `json:"peerEndpoint,omitempty"`
+	// PeerEndpoints are the two remote host:port endpoints paired with
+	// PeerPublicKeys. Omit them for responder-only roaming peers.
+	PeerEndpoints []string `json:"peerEndpoints,omitempty"`
 	// PresharedKeySecretRef names a Secret in this namespace holding an optional
 	// WireGuard preshared key.
 	PresharedKeySecretRef *string `json:"presharedKeySecretRef,omitempty"`
@@ -49,11 +56,31 @@ func (b *VPNConnectionWireGuardApplyConfiguration) WithPeerPublicKey(value strin
 	return b
 }
 
+// WithPeerPublicKeys adds the given value to the PeerPublicKeys field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the PeerPublicKeys field.
+func (b *VPNConnectionWireGuardApplyConfiguration) WithPeerPublicKeys(values ...string) *VPNConnectionWireGuardApplyConfiguration {
+	for i := range values {
+		b.PeerPublicKeys = append(b.PeerPublicKeys, values[i])
+	}
+	return b
+}
+
 // WithPeerEndpoint sets the PeerEndpoint field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the PeerEndpoint field is set to the value of the last call.
 func (b *VPNConnectionWireGuardApplyConfiguration) WithPeerEndpoint(value string) *VPNConnectionWireGuardApplyConfiguration {
 	b.PeerEndpoint = &value
+	return b
+}
+
+// WithPeerEndpoints adds the given value to the PeerEndpoints field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the PeerEndpoints field.
+func (b *VPNConnectionWireGuardApplyConfiguration) WithPeerEndpoints(values ...string) *VPNConnectionWireGuardApplyConfiguration {
+	for i := range values {
+		b.PeerEndpoints = append(b.PeerEndpoints, values[i])
+	}
 	return b
 }
 

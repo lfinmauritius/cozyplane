@@ -18,6 +18,10 @@ limitations under the License.
 
 package v1alpha1
 
+import (
+	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
+)
+
 // VPNConnectionIPsecApplyConfiguration represents a declarative configuration of the VPNConnectionIPsec type for use
 // with apply.
 //
@@ -34,6 +38,14 @@ type VPNConnectionIPsecApplyConfiguration struct {
 	Proposals []string `json:"proposals,omitempty"`
 	// DPDDelay is the dead-peer-detection interval in seconds; zero disables it.
 	DPDDelay *int32 `json:"dpdDelay,omitempty"`
+	// StartAction selects whether this side actively initiates IKE. When unset,
+	// the compatibility default is Start if peerAddress is set and None for a
+	// responder without a peerAddress.
+	StartAction *sdnv1alpha1.VPNIPsecStartAction `json:"startAction,omitempty"`
+	// AddressPool selects a named pool on the gateway for a roadwarrior client.
+	// It is valid with certificate or EAP authentication and makes the connection
+	// responder-only.
+	AddressPool *string `json:"addressPool,omitempty"`
 }
 
 // VPNConnectionIPsecApplyConfiguration constructs a declarative configuration of the VPNConnectionIPsec type for use with
@@ -73,5 +85,21 @@ func (b *VPNConnectionIPsecApplyConfiguration) WithProposals(values ...string) *
 // If called multiple times, the DPDDelay field is set to the value of the last call.
 func (b *VPNConnectionIPsecApplyConfiguration) WithDPDDelay(value int32) *VPNConnectionIPsecApplyConfiguration {
 	b.DPDDelay = &value
+	return b
+}
+
+// WithStartAction sets the StartAction field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the StartAction field is set to the value of the last call.
+func (b *VPNConnectionIPsecApplyConfiguration) WithStartAction(value sdnv1alpha1.VPNIPsecStartAction) *VPNConnectionIPsecApplyConfiguration {
+	b.StartAction = &value
+	return b
+}
+
+// WithAddressPool sets the AddressPool field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the AddressPool field is set to the value of the last call.
+func (b *VPNConnectionIPsecApplyConfiguration) WithAddressPool(value string) *VPNConnectionIPsecApplyConfiguration {
+	b.AddressPool = &value
 	return b
 }

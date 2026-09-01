@@ -687,6 +687,26 @@ func RegisterConversions(s *runtime.Scheme) error {
 	}); err != nil {
 		return err
 	}
+	if err := s.AddGeneratedConversionFunc((*VPNGatewayActiveActive)(nil), (*sdn.VPNGatewayActiveActive)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1alpha1_VPNGatewayActiveActive_To_sdn_VPNGatewayActiveActive(a.(*VPNGatewayActiveActive), b.(*sdn.VPNGatewayActiveActive), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*sdn.VPNGatewayActiveActive)(nil), (*VPNGatewayActiveActive)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_sdn_VPNGatewayActiveActive_To_v1alpha1_VPNGatewayActiveActive(a.(*sdn.VPNGatewayActiveActive), b.(*VPNGatewayActiveActive), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*VPNGatewayHA)(nil), (*sdn.VPNGatewayHA)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1alpha1_VPNGatewayHA_To_sdn_VPNGatewayHA(a.(*VPNGatewayHA), b.(*sdn.VPNGatewayHA), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*sdn.VPNGatewayHA)(nil), (*VPNGatewayHA)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_sdn_VPNGatewayHA_To_v1alpha1_VPNGatewayHA(a.(*sdn.VPNGatewayHA), b.(*VPNGatewayHA), scope)
+	}); err != nil {
+		return err
+	}
 	if err := s.AddGeneratedConversionFunc((*VPNGatewayIPsec)(nil), (*sdn.VPNGatewayIPsec)(nil), func(a, b interface{}, scope conversion.Scope) error {
 		return Convert_v1alpha1_VPNGatewayIPsec_To_sdn_VPNGatewayIPsec(a.(*VPNGatewayIPsec), b.(*sdn.VPNGatewayIPsec), scope)
 	}); err != nil {
@@ -727,6 +747,16 @@ func RegisterConversions(s *runtime.Scheme) error {
 	}); err != nil {
 		return err
 	}
+	if err := s.AddGeneratedConversionFunc((*VPNGatewayVirtualMachine)(nil), (*sdn.VPNGatewayVirtualMachine)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1alpha1_VPNGatewayVirtualMachine_To_sdn_VPNGatewayVirtualMachine(a.(*VPNGatewayVirtualMachine), b.(*sdn.VPNGatewayVirtualMachine), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*sdn.VPNGatewayVirtualMachine)(nil), (*VPNGatewayVirtualMachine)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_sdn_VPNGatewayVirtualMachine_To_v1alpha1_VPNGatewayVirtualMachine(a.(*sdn.VPNGatewayVirtualMachine), b.(*VPNGatewayVirtualMachine), scope)
+	}); err != nil {
+		return err
+	}
 	if err := s.AddGeneratedConversionFunc((*VPNGatewayWireGuard)(nil), (*sdn.VPNGatewayWireGuard)(nil), func(a, b interface{}, scope conversion.Scope) error {
 		return Convert_v1alpha1_VPNGatewayWireGuard_To_sdn_VPNGatewayWireGuard(a.(*VPNGatewayWireGuard), b.(*sdn.VPNGatewayWireGuard), scope)
 	}); err != nil {
@@ -734,6 +764,36 @@ func RegisterConversions(s *runtime.Scheme) error {
 	}
 	if err := s.AddGeneratedConversionFunc((*sdn.VPNGatewayWireGuard)(nil), (*VPNGatewayWireGuard)(nil), func(a, b interface{}, scope conversion.Scope) error {
 		return Convert_sdn_VPNGatewayWireGuard_To_v1alpha1_VPNGatewayWireGuard(a.(*sdn.VPNGatewayWireGuard), b.(*VPNGatewayWireGuard), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*VPNIPsecAddressPool)(nil), (*sdn.VPNIPsecAddressPool)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1alpha1_VPNIPsecAddressPool_To_sdn_VPNIPsecAddressPool(a.(*VPNIPsecAddressPool), b.(*sdn.VPNIPsecAddressPool), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*sdn.VPNIPsecAddressPool)(nil), (*VPNIPsecAddressPool)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_sdn_VPNIPsecAddressPool_To_v1alpha1_VPNIPsecAddressPool(a.(*sdn.VPNIPsecAddressPool), b.(*VPNIPsecAddressPool), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*VPNIPsecCertificateAuth)(nil), (*sdn.VPNIPsecCertificateAuth)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1alpha1_VPNIPsecCertificateAuth_To_sdn_VPNIPsecCertificateAuth(a.(*VPNIPsecCertificateAuth), b.(*sdn.VPNIPsecCertificateAuth), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*sdn.VPNIPsecCertificateAuth)(nil), (*VPNIPsecCertificateAuth)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_sdn_VPNIPsecCertificateAuth_To_v1alpha1_VPNIPsecCertificateAuth(a.(*sdn.VPNIPsecCertificateAuth), b.(*VPNIPsecCertificateAuth), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*VPNIPsecEAPAuth)(nil), (*sdn.VPNIPsecEAPAuth)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1alpha1_VPNIPsecEAPAuth_To_sdn_VPNIPsecEAPAuth(a.(*VPNIPsecEAPAuth), b.(*sdn.VPNIPsecEAPAuth), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*sdn.VPNIPsecEAPAuth)(nil), (*VPNIPsecEAPAuth)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_sdn_VPNIPsecEAPAuth_To_v1alpha1_VPNIPsecEAPAuth(a.(*sdn.VPNIPsecEAPAuth), b.(*VPNIPsecEAPAuth), scope)
 	}); err != nil {
 		return err
 	}
@@ -1881,6 +1941,7 @@ func Convert_sdn_VPCGatewayRoute_To_v1alpha1_VPCGatewayRoute(in *sdn.VPCGatewayR
 func autoConvert_v1alpha1_VPCGatewayRouteStatus_To_sdn_VPCGatewayRouteStatus(in *VPCGatewayRouteStatus, out *sdn.VPCGatewayRouteStatus, s conversion.Scope) error {
 	out.CIDRs = *(*[]string)(unsafe.Pointer(&in.CIDRs))
 	out.Port = in.Port
+	out.Ports = *(*[]string)(unsafe.Pointer(&in.Ports))
 	return nil
 }
 
@@ -1892,6 +1953,7 @@ func Convert_v1alpha1_VPCGatewayRouteStatus_To_sdn_VPCGatewayRouteStatus(in *VPC
 func autoConvert_sdn_VPCGatewayRouteStatus_To_v1alpha1_VPCGatewayRouteStatus(in *sdn.VPCGatewayRouteStatus, out *VPCGatewayRouteStatus, s conversion.Scope) error {
 	out.CIDRs = *(*[]string)(unsafe.Pointer(&in.CIDRs))
 	out.Port = in.Port
+	out.Ports = *(*[]string)(unsafe.Pointer(&in.Ports))
 	return nil
 }
 
@@ -2231,6 +2293,8 @@ func autoConvert_v1alpha1_VPNConnectionIPsec_To_sdn_VPNConnectionIPsec(in *VPNCo
 	}
 	out.Proposals = *(*[]string)(unsafe.Pointer(&in.Proposals))
 	out.DPDDelay = in.DPDDelay
+	out.StartAction = sdn.VPNIPsecStartAction(in.StartAction)
+	out.AddressPool = in.AddressPool
 	return nil
 }
 
@@ -2246,6 +2310,8 @@ func autoConvert_sdn_VPNConnectionIPsec_To_v1alpha1_VPNConnectionIPsec(in *sdn.V
 	}
 	out.Proposals = *(*[]string)(unsafe.Pointer(&in.Proposals))
 	out.DPDDelay = in.DPDDelay
+	out.StartAction = VPNIPsecStartAction(in.StartAction)
+	out.AddressPool = in.AddressPool
 	return nil
 }
 
@@ -2256,6 +2322,8 @@ func Convert_sdn_VPNConnectionIPsec_To_v1alpha1_VPNConnectionIPsec(in *sdn.VPNCo
 
 func autoConvert_v1alpha1_VPNConnectionIPsecAuth_To_sdn_VPNConnectionIPsecAuth(in *VPNConnectionIPsecAuth, out *sdn.VPNConnectionIPsecAuth, s conversion.Scope) error {
 	out.PSKSecretRef = in.PSKSecretRef
+	out.Certificate = (*sdn.VPNIPsecCertificateAuth)(unsafe.Pointer(in.Certificate))
+	out.EAP = (*sdn.VPNIPsecEAPAuth)(unsafe.Pointer(in.EAP))
 	return nil
 }
 
@@ -2266,6 +2334,8 @@ func Convert_v1alpha1_VPNConnectionIPsecAuth_To_sdn_VPNConnectionIPsecAuth(in *V
 
 func autoConvert_sdn_VPNConnectionIPsecAuth_To_v1alpha1_VPNConnectionIPsecAuth(in *sdn.VPNConnectionIPsecAuth, out *VPNConnectionIPsecAuth, s conversion.Scope) error {
 	out.PSKSecretRef = in.PSKSecretRef
+	out.Certificate = (*VPNIPsecCertificateAuth)(unsafe.Pointer(in.Certificate))
+	out.EAP = (*VPNIPsecEAPAuth)(unsafe.Pointer(in.EAP))
 	return nil
 }
 
@@ -2329,6 +2399,8 @@ func Convert_sdn_VPNConnectionSpec_To_v1alpha1_VPNConnectionSpec(in *sdn.VPNConn
 func autoConvert_v1alpha1_VPNConnectionStatus_To_sdn_VPNConnectionStatus(in *VPNConnectionStatus, out *sdn.VPNConnectionStatus, s conversion.Scope) error {
 	out.Phase = sdn.VPNConnectionPhase(in.Phase)
 	out.LastHandshake = (*v1.Time)(unsafe.Pointer(in.LastHandshake))
+	out.ObservedAt = (*v1.Time)(unsafe.Pointer(in.ObservedAt))
+	out.AssignedAddresses = *(*[]string)(unsafe.Pointer(&in.AssignedAddresses))
 	out.Conditions = *(*[]v1.Condition)(unsafe.Pointer(&in.Conditions))
 	return nil
 }
@@ -2341,6 +2413,8 @@ func Convert_v1alpha1_VPNConnectionStatus_To_sdn_VPNConnectionStatus(in *VPNConn
 func autoConvert_sdn_VPNConnectionStatus_To_v1alpha1_VPNConnectionStatus(in *sdn.VPNConnectionStatus, out *VPNConnectionStatus, s conversion.Scope) error {
 	out.Phase = VPNConnectionPhase(in.Phase)
 	out.LastHandshake = (*v1.Time)(unsafe.Pointer(in.LastHandshake))
+	out.ObservedAt = (*v1.Time)(unsafe.Pointer(in.ObservedAt))
+	out.AssignedAddresses = *(*[]string)(unsafe.Pointer(&in.AssignedAddresses))
 	out.Conditions = *(*[]v1.Condition)(unsafe.Pointer(&in.Conditions))
 	return nil
 }
@@ -2352,7 +2426,9 @@ func Convert_sdn_VPNConnectionStatus_To_v1alpha1_VPNConnectionStatus(in *sdn.VPN
 
 func autoConvert_v1alpha1_VPNConnectionWireGuard_To_sdn_VPNConnectionWireGuard(in *VPNConnectionWireGuard, out *sdn.VPNConnectionWireGuard, s conversion.Scope) error {
 	out.PeerPublicKey = in.PeerPublicKey
+	out.PeerPublicKeys = *(*[]string)(unsafe.Pointer(&in.PeerPublicKeys))
 	out.PeerEndpoint = in.PeerEndpoint
+	out.PeerEndpoints = *(*[]string)(unsafe.Pointer(&in.PeerEndpoints))
 	out.PresharedKeySecretRef = in.PresharedKeySecretRef
 	out.PersistentKeepalive = in.PersistentKeepalive
 	return nil
@@ -2365,7 +2441,9 @@ func Convert_v1alpha1_VPNConnectionWireGuard_To_sdn_VPNConnectionWireGuard(in *V
 
 func autoConvert_sdn_VPNConnectionWireGuard_To_v1alpha1_VPNConnectionWireGuard(in *sdn.VPNConnectionWireGuard, out *VPNConnectionWireGuard, s conversion.Scope) error {
 	out.PeerPublicKey = in.PeerPublicKey
+	out.PeerPublicKeys = *(*[]string)(unsafe.Pointer(&in.PeerPublicKeys))
 	out.PeerEndpoint = in.PeerEndpoint
+	out.PeerEndpoints = *(*[]string)(unsafe.Pointer(&in.PeerEndpoints))
 	out.PresharedKeySecretRef = in.PresharedKeySecretRef
 	out.PersistentKeepalive = in.PersistentKeepalive
 	return nil
@@ -2379,6 +2457,7 @@ func Convert_sdn_VPNConnectionWireGuard_To_v1alpha1_VPNConnectionWireGuard(in *s
 func autoConvert_v1alpha1_VPNExternalAddress_To_sdn_VPNExternalAddress(in *VPNExternalAddress, out *sdn.VPNExternalAddress, s conversion.Scope) error {
 	out.LoadBalancerClass = in.LoadBalancerClass
 	out.AddressClaimName = in.AddressClaimName
+	out.AddressClaimNames = *(*[]string)(unsafe.Pointer(&in.AddressClaimNames))
 	return nil
 }
 
@@ -2390,6 +2469,7 @@ func Convert_v1alpha1_VPNExternalAddress_To_sdn_VPNExternalAddress(in *VPNExtern
 func autoConvert_sdn_VPNExternalAddress_To_v1alpha1_VPNExternalAddress(in *sdn.VPNExternalAddress, out *VPNExternalAddress, s conversion.Scope) error {
 	out.LoadBalancerClass = in.LoadBalancerClass
 	out.AddressClaimName = in.AddressClaimName
+	out.AddressClaimNames = *(*[]string)(unsafe.Pointer(&in.AddressClaimNames))
 	return nil
 }
 
@@ -2430,8 +2510,62 @@ func Convert_sdn_VPNGateway_To_v1alpha1_VPNGateway(in *sdn.VPNGateway, out *VPNG
 	return autoConvert_sdn_VPNGateway_To_v1alpha1_VPNGateway(in, out, s)
 }
 
+func autoConvert_v1alpha1_VPNGatewayActiveActive_To_sdn_VPNGatewayActiveActive(in *VPNGatewayActiveActive, out *sdn.VPNGatewayActiveActive, s conversion.Scope) error {
+	out.LocalASN = in.LocalASN
+	out.PeerASN = in.PeerASN
+	out.PeerAddresses = *(*[]string)(unsafe.Pointer(&in.PeerAddresses))
+	out.BFD = in.BFD
+	return nil
+}
+
+// Convert_v1alpha1_VPNGatewayActiveActive_To_sdn_VPNGatewayActiveActive is an autogenerated conversion function.
+func Convert_v1alpha1_VPNGatewayActiveActive_To_sdn_VPNGatewayActiveActive(in *VPNGatewayActiveActive, out *sdn.VPNGatewayActiveActive, s conversion.Scope) error {
+	return autoConvert_v1alpha1_VPNGatewayActiveActive_To_sdn_VPNGatewayActiveActive(in, out, s)
+}
+
+func autoConvert_sdn_VPNGatewayActiveActive_To_v1alpha1_VPNGatewayActiveActive(in *sdn.VPNGatewayActiveActive, out *VPNGatewayActiveActive, s conversion.Scope) error {
+	out.LocalASN = in.LocalASN
+	out.PeerASN = in.PeerASN
+	out.PeerAddresses = *(*[]string)(unsafe.Pointer(&in.PeerAddresses))
+	out.BFD = in.BFD
+	return nil
+}
+
+// Convert_sdn_VPNGatewayActiveActive_To_v1alpha1_VPNGatewayActiveActive is an autogenerated conversion function.
+func Convert_sdn_VPNGatewayActiveActive_To_v1alpha1_VPNGatewayActiveActive(in *sdn.VPNGatewayActiveActive, out *VPNGatewayActiveActive, s conversion.Scope) error {
+	return autoConvert_sdn_VPNGatewayActiveActive_To_v1alpha1_VPNGatewayActiveActive(in, out, s)
+}
+
+func autoConvert_v1alpha1_VPNGatewayHA_To_sdn_VPNGatewayHA(in *VPNGatewayHA, out *sdn.VPNGatewayHA, s conversion.Scope) error {
+	out.Mode = sdn.VPNGatewayHAMode(in.Mode)
+	out.ActiveActive = (*sdn.VPNGatewayActiveActive)(unsafe.Pointer(in.ActiveActive))
+	out.VirtualMachine = (*sdn.VPNGatewayVirtualMachine)(unsafe.Pointer(in.VirtualMachine))
+	return nil
+}
+
+// Convert_v1alpha1_VPNGatewayHA_To_sdn_VPNGatewayHA is an autogenerated conversion function.
+func Convert_v1alpha1_VPNGatewayHA_To_sdn_VPNGatewayHA(in *VPNGatewayHA, out *sdn.VPNGatewayHA, s conversion.Scope) error {
+	return autoConvert_v1alpha1_VPNGatewayHA_To_sdn_VPNGatewayHA(in, out, s)
+}
+
+func autoConvert_sdn_VPNGatewayHA_To_v1alpha1_VPNGatewayHA(in *sdn.VPNGatewayHA, out *VPNGatewayHA, s conversion.Scope) error {
+	out.Mode = VPNGatewayHAMode(in.Mode)
+	out.ActiveActive = (*VPNGatewayActiveActive)(unsafe.Pointer(in.ActiveActive))
+	out.VirtualMachine = (*VPNGatewayVirtualMachine)(unsafe.Pointer(in.VirtualMachine))
+	return nil
+}
+
+// Convert_sdn_VPNGatewayHA_To_v1alpha1_VPNGatewayHA is an autogenerated conversion function.
+func Convert_sdn_VPNGatewayHA_To_v1alpha1_VPNGatewayHA(in *sdn.VPNGatewayHA, out *VPNGatewayHA, s conversion.Scope) error {
+	return autoConvert_sdn_VPNGatewayHA_To_v1alpha1_VPNGatewayHA(in, out, s)
+}
+
 func autoConvert_v1alpha1_VPNGatewayIPsec_To_sdn_VPNGatewayIPsec(in *VPNGatewayIPsec, out *sdn.VPNGatewayIPsec, s conversion.Scope) error {
 	out.Proposals = *(*[]string)(unsafe.Pointer(&in.Proposals))
+	out.CredentialSecretRef = in.CredentialSecretRef
+	out.TrustedCASecretRef = in.TrustedCASecretRef
+	out.LocalIdentity = in.LocalIdentity
+	out.AddressPools = *(*[]sdn.VPNIPsecAddressPool)(unsafe.Pointer(&in.AddressPools))
 	return nil
 }
 
@@ -2442,6 +2576,10 @@ func Convert_v1alpha1_VPNGatewayIPsec_To_sdn_VPNGatewayIPsec(in *VPNGatewayIPsec
 
 func autoConvert_sdn_VPNGatewayIPsec_To_v1alpha1_VPNGatewayIPsec(in *sdn.VPNGatewayIPsec, out *VPNGatewayIPsec, s conversion.Scope) error {
 	out.Proposals = *(*[]string)(unsafe.Pointer(&in.Proposals))
+	out.CredentialSecretRef = in.CredentialSecretRef
+	out.TrustedCASecretRef = in.TrustedCASecretRef
+	out.LocalIdentity = in.LocalIdentity
+	out.AddressPools = *(*[]VPNIPsecAddressPool)(unsafe.Pointer(&in.AddressPools))
 	return nil
 }
 
@@ -2482,6 +2620,7 @@ func autoConvert_v1alpha1_VPNGatewaySpec_To_sdn_VPNGatewaySpec(in *VPNGatewaySpe
 		return err
 	}
 	out.HighAvailability = in.HighAvailability
+	out.HA = (*sdn.VPNGatewayHA)(unsafe.Pointer(in.HA))
 	return nil
 }
 
@@ -2500,6 +2639,7 @@ func autoConvert_sdn_VPNGatewaySpec_To_v1alpha1_VPNGatewaySpec(in *sdn.VPNGatewa
 		return err
 	}
 	out.HighAvailability = in.HighAvailability
+	out.HA = (*VPNGatewayHA)(unsafe.Pointer(in.HA))
 	return nil
 }
 
@@ -2510,8 +2650,11 @@ func Convert_sdn_VPNGatewaySpec_To_v1alpha1_VPNGatewaySpec(in *sdn.VPNGatewaySpe
 
 func autoConvert_v1alpha1_VPNGatewayStatus_To_sdn_VPNGatewayStatus(in *VPNGatewayStatus, out *sdn.VPNGatewayStatus, s conversion.Scope) error {
 	out.Address = in.Address
+	out.Addresses = *(*[]string)(unsafe.Pointer(&in.Addresses))
 	out.PublicKey = in.PublicKey
+	out.PublicKeys = *(*[]string)(unsafe.Pointer(&in.PublicKeys))
 	out.AppliancePort = in.AppliancePort
+	out.AppliancePorts = *(*[]string)(unsafe.Pointer(&in.AppliancePorts))
 	out.Routes = *(*[]sdn.VPCGatewayRouteStatus)(unsafe.Pointer(&in.Routes))
 	out.Phase = sdn.VPNGatewayPhase(in.Phase)
 	out.Conditions = *(*[]v1.Condition)(unsafe.Pointer(&in.Conditions))
@@ -2525,8 +2668,11 @@ func Convert_v1alpha1_VPNGatewayStatus_To_sdn_VPNGatewayStatus(in *VPNGatewaySta
 
 func autoConvert_sdn_VPNGatewayStatus_To_v1alpha1_VPNGatewayStatus(in *sdn.VPNGatewayStatus, out *VPNGatewayStatus, s conversion.Scope) error {
 	out.Address = in.Address
+	out.Addresses = *(*[]string)(unsafe.Pointer(&in.Addresses))
 	out.PublicKey = in.PublicKey
+	out.PublicKeys = *(*[]string)(unsafe.Pointer(&in.PublicKeys))
 	out.AppliancePort = in.AppliancePort
+	out.AppliancePorts = *(*[]string)(unsafe.Pointer(&in.AppliancePorts))
 	out.Routes = *(*[]VPCGatewayRouteStatus)(unsafe.Pointer(&in.Routes))
 	out.Phase = VPNGatewayPhase(in.Phase)
 	out.Conditions = *(*[]v1.Condition)(unsafe.Pointer(&in.Conditions))
@@ -2536,6 +2682,30 @@ func autoConvert_sdn_VPNGatewayStatus_To_v1alpha1_VPNGatewayStatus(in *sdn.VPNGa
 // Convert_sdn_VPNGatewayStatus_To_v1alpha1_VPNGatewayStatus is an autogenerated conversion function.
 func Convert_sdn_VPNGatewayStatus_To_v1alpha1_VPNGatewayStatus(in *sdn.VPNGatewayStatus, out *VPNGatewayStatus, s conversion.Scope) error {
 	return autoConvert_sdn_VPNGatewayStatus_To_v1alpha1_VPNGatewayStatus(in, out, s)
+}
+
+func autoConvert_v1alpha1_VPNGatewayVirtualMachine_To_sdn_VPNGatewayVirtualMachine(in *VPNGatewayVirtualMachine, out *sdn.VPNGatewayVirtualMachine, s conversion.Scope) error {
+	out.Image = in.Image
+	out.StateClaimName = in.StateClaimName
+	out.CloudInitSecretRef = in.CloudInitSecretRef
+	return nil
+}
+
+// Convert_v1alpha1_VPNGatewayVirtualMachine_To_sdn_VPNGatewayVirtualMachine is an autogenerated conversion function.
+func Convert_v1alpha1_VPNGatewayVirtualMachine_To_sdn_VPNGatewayVirtualMachine(in *VPNGatewayVirtualMachine, out *sdn.VPNGatewayVirtualMachine, s conversion.Scope) error {
+	return autoConvert_v1alpha1_VPNGatewayVirtualMachine_To_sdn_VPNGatewayVirtualMachine(in, out, s)
+}
+
+func autoConvert_sdn_VPNGatewayVirtualMachine_To_v1alpha1_VPNGatewayVirtualMachine(in *sdn.VPNGatewayVirtualMachine, out *VPNGatewayVirtualMachine, s conversion.Scope) error {
+	out.Image = in.Image
+	out.StateClaimName = in.StateClaimName
+	out.CloudInitSecretRef = in.CloudInitSecretRef
+	return nil
+}
+
+// Convert_sdn_VPNGatewayVirtualMachine_To_v1alpha1_VPNGatewayVirtualMachine is an autogenerated conversion function.
+func Convert_sdn_VPNGatewayVirtualMachine_To_v1alpha1_VPNGatewayVirtualMachine(in *sdn.VPNGatewayVirtualMachine, out *VPNGatewayVirtualMachine, s conversion.Scope) error {
+	return autoConvert_sdn_VPNGatewayVirtualMachine_To_v1alpha1_VPNGatewayVirtualMachine(in, out, s)
 }
 
 func autoConvert_v1alpha1_VPNGatewayWireGuard_To_sdn_VPNGatewayWireGuard(in *VPNGatewayWireGuard, out *sdn.VPNGatewayWireGuard, s conversion.Scope) error {
@@ -2556,4 +2726,70 @@ func autoConvert_sdn_VPNGatewayWireGuard_To_v1alpha1_VPNGatewayWireGuard(in *sdn
 // Convert_sdn_VPNGatewayWireGuard_To_v1alpha1_VPNGatewayWireGuard is an autogenerated conversion function.
 func Convert_sdn_VPNGatewayWireGuard_To_v1alpha1_VPNGatewayWireGuard(in *sdn.VPNGatewayWireGuard, out *VPNGatewayWireGuard, s conversion.Scope) error {
 	return autoConvert_sdn_VPNGatewayWireGuard_To_v1alpha1_VPNGatewayWireGuard(in, out, s)
+}
+
+func autoConvert_v1alpha1_VPNIPsecAddressPool_To_sdn_VPNIPsecAddressPool(in *VPNIPsecAddressPool, out *sdn.VPNIPsecAddressPool, s conversion.Scope) error {
+	out.Name = in.Name
+	out.CIDR = in.CIDR
+	out.DNS = *(*[]string)(unsafe.Pointer(&in.DNS))
+	return nil
+}
+
+// Convert_v1alpha1_VPNIPsecAddressPool_To_sdn_VPNIPsecAddressPool is an autogenerated conversion function.
+func Convert_v1alpha1_VPNIPsecAddressPool_To_sdn_VPNIPsecAddressPool(in *VPNIPsecAddressPool, out *sdn.VPNIPsecAddressPool, s conversion.Scope) error {
+	return autoConvert_v1alpha1_VPNIPsecAddressPool_To_sdn_VPNIPsecAddressPool(in, out, s)
+}
+
+func autoConvert_sdn_VPNIPsecAddressPool_To_v1alpha1_VPNIPsecAddressPool(in *sdn.VPNIPsecAddressPool, out *VPNIPsecAddressPool, s conversion.Scope) error {
+	out.Name = in.Name
+	out.CIDR = in.CIDR
+	out.DNS = *(*[]string)(unsafe.Pointer(&in.DNS))
+	return nil
+}
+
+// Convert_sdn_VPNIPsecAddressPool_To_v1alpha1_VPNIPsecAddressPool is an autogenerated conversion function.
+func Convert_sdn_VPNIPsecAddressPool_To_v1alpha1_VPNIPsecAddressPool(in *sdn.VPNIPsecAddressPool, out *VPNIPsecAddressPool, s conversion.Scope) error {
+	return autoConvert_sdn_VPNIPsecAddressPool_To_v1alpha1_VPNIPsecAddressPool(in, out, s)
+}
+
+func autoConvert_v1alpha1_VPNIPsecCertificateAuth_To_sdn_VPNIPsecCertificateAuth(in *VPNIPsecCertificateAuth, out *sdn.VPNIPsecCertificateAuth, s conversion.Scope) error {
+	out.RemoteIdentity = in.RemoteIdentity
+	return nil
+}
+
+// Convert_v1alpha1_VPNIPsecCertificateAuth_To_sdn_VPNIPsecCertificateAuth is an autogenerated conversion function.
+func Convert_v1alpha1_VPNIPsecCertificateAuth_To_sdn_VPNIPsecCertificateAuth(in *VPNIPsecCertificateAuth, out *sdn.VPNIPsecCertificateAuth, s conversion.Scope) error {
+	return autoConvert_v1alpha1_VPNIPsecCertificateAuth_To_sdn_VPNIPsecCertificateAuth(in, out, s)
+}
+
+func autoConvert_sdn_VPNIPsecCertificateAuth_To_v1alpha1_VPNIPsecCertificateAuth(in *sdn.VPNIPsecCertificateAuth, out *VPNIPsecCertificateAuth, s conversion.Scope) error {
+	out.RemoteIdentity = in.RemoteIdentity
+	return nil
+}
+
+// Convert_sdn_VPNIPsecCertificateAuth_To_v1alpha1_VPNIPsecCertificateAuth is an autogenerated conversion function.
+func Convert_sdn_VPNIPsecCertificateAuth_To_v1alpha1_VPNIPsecCertificateAuth(in *sdn.VPNIPsecCertificateAuth, out *VPNIPsecCertificateAuth, s conversion.Scope) error {
+	return autoConvert_sdn_VPNIPsecCertificateAuth_To_v1alpha1_VPNIPsecCertificateAuth(in, out, s)
+}
+
+func autoConvert_v1alpha1_VPNIPsecEAPAuth_To_sdn_VPNIPsecEAPAuth(in *VPNIPsecEAPAuth, out *sdn.VPNIPsecEAPAuth, s conversion.Scope) error {
+	out.Identity = in.Identity
+	out.SecretRef = in.SecretRef
+	return nil
+}
+
+// Convert_v1alpha1_VPNIPsecEAPAuth_To_sdn_VPNIPsecEAPAuth is an autogenerated conversion function.
+func Convert_v1alpha1_VPNIPsecEAPAuth_To_sdn_VPNIPsecEAPAuth(in *VPNIPsecEAPAuth, out *sdn.VPNIPsecEAPAuth, s conversion.Scope) error {
+	return autoConvert_v1alpha1_VPNIPsecEAPAuth_To_sdn_VPNIPsecEAPAuth(in, out, s)
+}
+
+func autoConvert_sdn_VPNIPsecEAPAuth_To_v1alpha1_VPNIPsecEAPAuth(in *sdn.VPNIPsecEAPAuth, out *VPNIPsecEAPAuth, s conversion.Scope) error {
+	out.Identity = in.Identity
+	out.SecretRef = in.SecretRef
+	return nil
+}
+
+// Convert_sdn_VPNIPsecEAPAuth_To_v1alpha1_VPNIPsecEAPAuth is an autogenerated conversion function.
+func Convert_sdn_VPNIPsecEAPAuth_To_v1alpha1_VPNIPsecEAPAuth(in *sdn.VPNIPsecEAPAuth, out *VPNIPsecEAPAuth, s conversion.Scope) error {
+	return autoConvert_sdn_VPNIPsecEAPAuth_To_v1alpha1_VPNIPsecEAPAuth(in, out, s)
 }

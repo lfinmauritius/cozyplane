@@ -34,6 +34,11 @@ type VPNConnectionStatusApplyConfiguration struct {
 	// LastHandshake is when the tunnel last completed a handshake, read back
 	// from the appliance's kernel state.
 	LastHandshake *v1.Time `json:"lastHandshake,omitempty"`
+	// ObservedAt is when the controller last obtained live tunnel state from the
+	// selected appliance. It stays empty while no appliance is reachable.
+	ObservedAt *v1.Time `json:"observedAt,omitempty"`
+	// AssignedAddresses are the virtual IPs currently leased to this identity.
+	AssignedAddresses []string `json:"assignedAddresses,omitempty"`
 	// Conditions is the detailed state.
 	Conditions []metav1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 }
@@ -57,6 +62,24 @@ func (b *VPNConnectionStatusApplyConfiguration) WithPhase(value sdnv1alpha1.VPNC
 // If called multiple times, the LastHandshake field is set to the value of the last call.
 func (b *VPNConnectionStatusApplyConfiguration) WithLastHandshake(value v1.Time) *VPNConnectionStatusApplyConfiguration {
 	b.LastHandshake = &value
+	return b
+}
+
+// WithObservedAt sets the ObservedAt field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ObservedAt field is set to the value of the last call.
+func (b *VPNConnectionStatusApplyConfiguration) WithObservedAt(value v1.Time) *VPNConnectionStatusApplyConfiguration {
+	b.ObservedAt = &value
+	return b
+}
+
+// WithAssignedAddresses adds the given value to the AssignedAddresses field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the AssignedAddresses field.
+func (b *VPNConnectionStatusApplyConfiguration) WithAssignedAddresses(values ...string) *VPNConnectionStatusApplyConfiguration {
+	for i := range values {
+		b.AssignedAddresses = append(b.AssignedAddresses, values[i])
+	}
 	return b
 }
 

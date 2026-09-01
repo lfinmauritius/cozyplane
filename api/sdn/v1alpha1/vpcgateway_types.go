@@ -249,6 +249,10 @@ type VPCGatewayRouteStatus struct {
 	// selected Port's binding lacks allowForwarding).
 	// +optional
 	Port string `json:"port,omitempty"`
+	// Ports are ECMP next-hops for this prefix. Port remains the first entry for
+	// additive compatibility with single-next-hop agents.
+	// +optional
+	Ports []string `json:"ports,omitempty"`
 }
 
 // +genclient

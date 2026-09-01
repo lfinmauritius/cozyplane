@@ -132,11 +132,14 @@ rules:
   # launcher-pod signal without it.
   - apiGroups: ["kubevirt.io"]
     resources: ["virtualmachineinstances"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Gateway Deployments for a VPCGateway family with no eBPF identity yet
   # (one with addresses for every family is pure eBPF — docs/north-south.md §6a).
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
   # Severed-gateway heal: recreate a Ready gateway pod whose .1 Port is gone.
   # watch: the persistent-Port controller watches virt-launcher pods to drive
@@ -212,6 +215,9 @@ spec:
             {{- end }}
             {{- if .Values.vpn.maxConnectionsPerGateway }}
             - --vpn-max-connections-per-gateway={{ .Values.vpn.maxConnectionsPerGateway }}
+            {{- end }}
+            {{- if .Values.vpn.hardenedAppliance }}
+            - --vpn-hardened-appliance=true
             {{- end }}
             {{- end }}
           env:

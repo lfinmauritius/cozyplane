@@ -31,13 +31,22 @@ type VPNGatewayStatusApplyConfiguration struct {
 	// Address is the assigned external endpoint address — what a tenant reads
 	// out to configure the remote peer.
 	Address *string `json:"address,omitempty"`
+	// Addresses are all active public endpoints. Address remains the first entry
+	// for compatibility with single-endpoint clients.
+	Addresses []string `json:"addresses,omitempty"`
 	// PublicKey is the WireGuard public key of this gateway's endpoint, which the
 	// tenant configures the remote peer with. The private key stays in a Secret
 	// the appliance mounts; only the public half is surfaced.
 	PublicKey *string `json:"publicKey,omitempty"`
+	// PublicKeys are the WireGuard identities of all active-active endpoints.
+	// PublicKey remains the first entry for compatibility.
+	PublicKeys []string `json:"publicKeys,omitempty"`
 	// AppliancePort is the cluster-scoped Port name of the tunnel appliance's
 	// leg in the VPC — the next-hop the connections' routes resolve to.
 	AppliancePort *string `json:"appliancePort,omitempty"`
+	// AppliancePorts are all ready route next-hops. AppliancePort remains the
+	// first entry for compatibility.
+	AppliancePorts []string `json:"appliancePorts,omitempty"`
 	// Routes reports the connections' remote CIDRs and the Port they are
 	// programmed toward, merged into the VPC route table by the agent (the same
 	// shape VPCGateway.status.routes uses).
@@ -62,6 +71,16 @@ func (b *VPNGatewayStatusApplyConfiguration) WithAddress(value string) *VPNGatew
 	return b
 }
 
+// WithAddresses adds the given value to the Addresses field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Addresses field.
+func (b *VPNGatewayStatusApplyConfiguration) WithAddresses(values ...string) *VPNGatewayStatusApplyConfiguration {
+	for i := range values {
+		b.Addresses = append(b.Addresses, values[i])
+	}
+	return b
+}
+
 // WithPublicKey sets the PublicKey field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the PublicKey field is set to the value of the last call.
@@ -70,11 +89,31 @@ func (b *VPNGatewayStatusApplyConfiguration) WithPublicKey(value string) *VPNGat
 	return b
 }
 
+// WithPublicKeys adds the given value to the PublicKeys field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the PublicKeys field.
+func (b *VPNGatewayStatusApplyConfiguration) WithPublicKeys(values ...string) *VPNGatewayStatusApplyConfiguration {
+	for i := range values {
+		b.PublicKeys = append(b.PublicKeys, values[i])
+	}
+	return b
+}
+
 // WithAppliancePort sets the AppliancePort field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the AppliancePort field is set to the value of the last call.
 func (b *VPNGatewayStatusApplyConfiguration) WithAppliancePort(value string) *VPNGatewayStatusApplyConfiguration {
 	b.AppliancePort = &value
+	return b
+}
+
+// WithAppliancePorts adds the given value to the AppliancePorts field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the AppliancePorts field.
+func (b *VPNGatewayStatusApplyConfiguration) WithAppliancePorts(values ...string) *VPNGatewayStatusApplyConfiguration {
+	for i := range values {
+		b.AppliancePorts = append(b.AppliancePorts, values[i])
+	}
 	return b
 }
 

@@ -36,39 +36,36 @@ import (
 // `Scope` (the VPC's VNI), traffic to `CIDR` goes to the leg at `GwIP` —
 // delivered locally when NodeIP is nil, else encapsulated to that node.
 type RouteEntry struct {
-	Scope  uint32
-	CIDR   string
+	Scope    uint32
+	CIDR     string
+	NextHops []RouteNextHop
+	// GwIP/NodeIP retain source compatibility for single-next-hop callers.
 	GwIP   net.IP
-	NodeIP net.IP // nil when the next-hop leg is on this node
+	NodeIP net.IP
+}
+
+// RouteNextHop is one appliance leg in an ECMP route. NodeIP is nil when the
+// leg is local to the programming agent.
+type RouteNextHop struct {
+	GwIP   net.IP
+	NodeIP net.IP
 }
 
 // SyncRoutes makes the vpc_routes map exactly `desired`, pruning entries that
 // vanished while this agent was down. Mirrors SyncPeerNetworks:
 // diff-against-the-pinned-map, keyed by the deterministic LPM key.
 func (m *Manager) SyncRoutes(desired []RouteEntry) error {
-	want := map[overlayLpmKey]overlayGwEntry{}
+	want := map[overlayLpmKey]overlayRouteEntry{}
 	for _, d := range desired {
-		key, err := lpmKey(d.Scope, d.CIDR)
+		key, e, err := routeMapEntry(d)
 		if err != nil {
 			return err
-		}
-		gw, err := addr128(d.GwIP)
-		if err != nil {
-			return fmt.Errorf("route next-hop IP: %w", err)
-		}
-		e := overlayGwEntry{GwIp: gw}
-		if d.NodeIP != nil {
-			n4 := d.NodeIP.To4()
-			if n4 == nil {
-				return fmt.Errorf("route node IP %q is not IPv4", d.NodeIP)
-			}
-			e.NodeIp = binary.BigEndian.Uint32(n4) // tunnel-key host byte order
 		}
 		want[key] = e
 	}
 
 	var key overlayLpmKey
-	var val overlayGwEntry
+	var val overlayRouteEntry
 	var stale []overlayLpmKey
 	it := m.objs.VpcRoutes.Iterate()
 	for it.Next(&key, &val) {
@@ -91,6 +88,36 @@ func (m *Manager) SyncRoutes(desired []RouteEntry) error {
 		}
 	}
 	return nil
+}
+
+func routeMapEntry(d RouteEntry) (overlayLpmKey, overlayRouteEntry, error) {
+	key, err := lpmKey(d.Scope, d.CIDR)
+	if err != nil {
+		return overlayLpmKey{}, overlayRouteEntry{}, err
+	}
+	nextHops := append([]RouteNextHop(nil), d.NextHops...)
+	if len(nextHops) == 0 && d.GwIP != nil {
+		nextHops = []RouteNextHop{{GwIP: d.GwIP, NodeIP: d.NodeIP}}
+	}
+	if len(nextHops) == 0 || len(nextHops) > 2 {
+		return overlayLpmKey{}, overlayRouteEntry{}, fmt.Errorf("route %s has %d next-hops; expected 1 or 2", d.CIDR, len(nextHops))
+	}
+	e := overlayRouteEntry{Count: uint8(len(nextHops))}
+	for i, nextHop := range nextHops {
+		gw, err := addr128(nextHop.GwIP)
+		if err != nil {
+			return overlayLpmKey{}, overlayRouteEntry{}, fmt.Errorf("route next-hop IP: %w", err)
+		}
+		e.NextHops[i].GwIp = gw
+		if nextHop.NodeIP != nil {
+			n4 := nextHop.NodeIP.To4()
+			if n4 == nil {
+				return overlayLpmKey{}, overlayRouteEntry{}, fmt.Errorf("route node IP %q is not IPv4", nextHop.NodeIP)
+			}
+			e.NextHops[i].NodeIp = binary.BigEndian.Uint32(n4)
+		}
+	}
+	return key, e, nil
 }
 
 // SetFwdCidr allows a forwarding leg (identified by its host-veth ifindex) to

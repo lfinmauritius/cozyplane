@@ -29,6 +29,9 @@ type VPCGatewayRouteStatusApplyConfiguration struct {
 	// empty when the route did not resolve (no live selected Port, or the
 	// selected Port's binding lacks allowForwarding).
 	Port *string `json:"port,omitempty"`
+	// Ports are ECMP next-hops for this prefix. Port remains the first entry for
+	// additive compatibility with single-next-hop agents.
+	Ports []string `json:"ports,omitempty"`
 }
 
 // VPCGatewayRouteStatusApplyConfiguration constructs a declarative configuration of the VPCGatewayRouteStatus type for use with
@@ -52,5 +55,15 @@ func (b *VPCGatewayRouteStatusApplyConfiguration) WithCIDRs(values ...string) *V
 // If called multiple times, the Port field is set to the value of the last call.
 func (b *VPCGatewayRouteStatusApplyConfiguration) WithPort(value string) *VPCGatewayRouteStatusApplyConfiguration {
 	b.Port = &value
+	return b
+}
+
+// WithPorts adds the given value to the Ports field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Ports field.
+func (b *VPCGatewayRouteStatusApplyConfiguration) WithPorts(values ...string) *VPCGatewayRouteStatusApplyConfiguration {
+	for i := range values {
+		b.Ports = append(b.Ports, values[i])
+	}
 	return b
 }

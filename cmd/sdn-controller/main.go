@@ -67,6 +67,7 @@ func main() {
 		vpnTolerationKey     string
 		vpnMaxGateways       int
 		vpnMaxConnections    int
+		vpnHardened          bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -95,6 +96,8 @@ func main() {
 		"per-tenant cap on managed VPN gateways (0 uses the built-in default)")
 	flag.IntVar(&vpnMaxConnections, "vpn-max-connections-per-gateway", 0,
 		"per-gateway cap on VPN connections/peers (0 uses the built-in default)")
+	flag.BoolVar(&vpnHardened, "vpn-hardened-appliance", false,
+		"use pod forwarding sysctls and only NET_ADMIN/NET_RAW/NET_BIND_SERVICE instead of privileged VPN appliances")
 
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
@@ -260,6 +263,7 @@ func main() {
 				Tolerations:              vpnTolerations,
 				MaxGatewaysPerNamespace:  vpnMaxGateways,
 				MaxConnectionsPerGateway: vpnMaxConnections,
+				HardenedAppliance:        vpnHardened,
 				// The route-CIDR deny-set reuses the same cluster-internal networks
 				// the gateway pods are told never to forward to.
 				InternalCIDRs: parseCIDRs(internalCIDRs),

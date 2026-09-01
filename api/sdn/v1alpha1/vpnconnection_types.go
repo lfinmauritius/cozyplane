@@ -29,6 +29,23 @@ const (
 	VPNConnectionPhasePending VPNConnectionPhase = "Pending"
 	// VPNConnectionPhaseEstablished means the tunnel has completed a handshake.
 	VPNConnectionPhaseEstablished VPNConnectionPhase = "Established"
+	// VPNConnectionPhaseDown means the route is materialized but the selected
+	// appliance reports no live peer/SA, or its live status cannot be read.
+	VPNConnectionPhaseDown VPNConnectionPhase = "Down"
+)
+
+// VPNIPsecStartAction controls which side actively initiates an IKEv2
+// connection. It maps directly to strongSwan's CHILD_SA start_action while
+// keeping the public API independent from VICI's stringly-typed surface.
+type VPNIPsecStartAction string
+
+const (
+	// VPNIPsecStartActionStart actively initiates the connection.
+	VPNIPsecStartActionStart VPNIPsecStartAction = "Start"
+	// VPNIPsecStartActionNone loads a responder-only connection. This is the
+	// value to use on one side of a managed-to-managed pair to avoid duplicate
+	// IKE SAs.
+	VPNIPsecStartActionNone VPNIPsecStartAction = "None"
 )
 
 // Condition types surfaced in VPNConnection status.
@@ -48,13 +65,27 @@ type LocalVPNGatewayRef struct {
 
 // VPNConnectionWireGuard configures a WireGuard peer.
 type VPNConnectionWireGuard struct {
-	// PeerPublicKey is the remote peer's WireGuard public key.
-	PeerPublicKey string `json:"peerPublicKey"`
+	// PeerPublicKey is the remote peer's WireGuard public key for a single
+	// tunnel. It is mutually exclusive with PeerPublicKeys.
+	// +optional
+	PeerPublicKey string `json:"peerPublicKey,omitempty"`
+
+	// PeerPublicKeys are the two remote identities used by an active-active
+	// gateway, ordered by appliance ordinal.
+	// +optional
+	// +listType=atomic
+	PeerPublicKeys []string `json:"peerPublicKeys,omitempty"`
 
 	// PeerEndpoint is the remote peer's host:port. Optional — a roaming peer may
 	// initiate, and WireGuard learns the endpoint from its handshake.
 	// +optional
 	PeerEndpoint string `json:"peerEndpoint,omitempty"`
+
+	// PeerEndpoints are the two remote host:port endpoints paired with
+	// PeerPublicKeys. Omit them for responder-only roaming peers.
+	// +optional
+	// +listType=atomic
+	PeerEndpoints []string `json:"peerEndpoints,omitempty"`
 
 	// PresharedKeySecretRef names a Secret in this namespace holding an optional
 	// WireGuard preshared key.
@@ -66,13 +97,38 @@ type VPNConnectionWireGuard struct {
 	PersistentKeepalive int32 `json:"persistentKeepalive,omitempty"`
 }
 
-// VPNConnectionIPsecAuth configures IPsec peer authentication. PSK first; cert
-// auth is a later increment.
+// VPNIPsecCertificateAuth identifies a certificate-authenticated remote peer.
+type VPNIPsecCertificateAuth struct {
+	// RemoteIdentity is the exact IKE identity the client certificate must carry.
+	RemoteIdentity string `json:"remoteIdentity"`
+}
+
+// VPNIPsecEAPAuth configures one revocable EAP identity.
+type VPNIPsecEAPAuth struct {
+	// Identity is the exact EAP identity accepted for this connection.
+	Identity string `json:"identity"`
+
+	// SecretRef names a Secret containing the EAP password under "password" or
+	// "eap", or as its sole data entry.
+	SecretRef string `json:"secretRef"`
+}
+
+// VPNConnectionIPsecAuth configures IPsec peer authentication. Exactly one of
+// PSKSecretRef, Certificate, or EAP is selected.
 type VPNConnectionIPsecAuth struct {
 	// PSKSecretRef names a Secret in this namespace holding the pre-shared key
 	// (conventional data key "psk", or the Secret's sole entry).
 	// +optional
 	PSKSecretRef string `json:"pskSecretRef,omitempty"`
+
+	// Certificate authenticates a remote peer with a certificate issued by the
+	// gateway's configured trusted CA.
+	// +optional
+	Certificate *VPNIPsecCertificateAuth `json:"certificate,omitempty"`
+
+	// EAP authenticates one roadwarrior identity using a password Secret.
+	// +optional
+	EAP *VPNIPsecEAPAuth `json:"eap,omitempty"`
 }
 
 // VPNConnectionIPsec configures an IKEv2 peer, terminated by a strongSwan
@@ -89,11 +145,24 @@ type VPNConnectionIPsec struct {
 	// Proposals overrides the gateway's default IKE/ESP proposals for this peer
 	// (strongSwan syntax). Empty inherits the gateway default.
 	// +optional
+	// +listType=atomic
 	Proposals []string `json:"proposals,omitempty"`
 
 	// DPDDelay is the dead-peer-detection interval in seconds; zero disables it.
 	// +optional
 	DPDDelay int32 `json:"dpdDelay,omitempty"`
+
+	// StartAction selects whether this side actively initiates IKE. When unset,
+	// the compatibility default is Start if peerAddress is set and None for a
+	// responder without a peerAddress.
+	// +optional
+	StartAction VPNIPsecStartAction `json:"startAction,omitempty"`
+
+	// AddressPool selects a named pool on the gateway for a roadwarrior client.
+	// It is valid with certificate or EAP authentication and makes the connection
+	// responder-only.
+	// +optional
+	AddressPool string `json:"addressPool,omitempty"`
 }
 
 // VPNConnectionSpec declares one tunnel to a remote site (issue #6).
@@ -105,6 +174,7 @@ type VPNConnectionSpec struct {
 	// RemoteCIDRs are the remote networks reachable over this tunnel — routed
 	// into the VPC toward the gateway and admitted as the gateway's scoped
 	// forwarding sources.
+	// +listType=atomic
 	RemoteCIDRs []string `json:"remoteCIDRs"`
 
 	// WireGuard configures the peer. Exactly one tunnel backend is set, and it
@@ -128,8 +198,20 @@ type VPNConnectionStatus struct {
 	// +optional
 	LastHandshake *metav1.Time `json:"lastHandshake,omitempty"`
 
+	// ObservedAt is when the controller last obtained live tunnel state from the
+	// selected appliance. It stays empty while no appliance is reachable.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+
+	// AssignedAddresses are the virtual IPs currently leased to this identity.
+	// +optional
+	// +listType=atomic
+	AssignedAddresses []string `json:"assignedAddresses,omitempty"`
+
 	// Conditions is the detailed state.
 	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 

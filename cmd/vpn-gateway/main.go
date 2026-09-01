@@ -41,7 +41,8 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	"github.com/lllamnyp/cozyplane/datapath"
+	"github.com/lllamnyp/cozyplane/internal/vpnnet"
+	"github.com/lllamnyp/cozyplane/internal/vpnstatus"
 )
 
 const wgDev = "wg0"
@@ -49,9 +50,12 @@ const wgDev = "wg0"
 // config is the mounted tunnel description. It carries the private key and PSKs,
 // so it is delivered as a Secret, never a ConfigMap.
 type config struct {
-	PrivateKey string `json:"privateKey"`
-	ListenPort int    `json:"listenPort,omitempty"`
-	Peers      []peer `json:"peers"`
+	PrivateKey    string   `json:"privateKey"`
+	PrivateKeys   []string `json:"privateKeys,omitempty"`
+	ListenPort    int      `json:"listenPort,omitempty"`
+	MTU           int      `json:"mtu,omitempty"`
+	Peers         []peer   `json:"peers"`
+	PeerInstances [][]peer `json:"peerInstances,omitempty"`
 }
 
 type peer struct {
@@ -84,16 +88,24 @@ func run(path string, log *slog.Logger) error {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
-	priv, err := wgtypes.ParseKey(cfg.PrivateKey)
+	privateKey, err := selectPrivateKey(cfg, os.Getenv("POD_NAME"))
+	if err != nil {
+		return err
+	}
+	priv, err := wgtypes.ParseKey(privateKey)
 	if err != nil {
 		return fmt.Errorf("private key: %w", err)
 	}
+	instancePeers, err := selectInstancePeers(cfg, os.Getenv("POD_NAME"))
+	if err != nil {
+		return err
+	}
+	cfg.Peers = instancePeers
 
 	// The appliance forwards between its WireGuard leg and its VPC leg.
-	if err := datapath.WriteProcSys("net/ipv4/ip_forward", "1"); err != nil {
-		return fmt.Errorf("enable ip_forward: %w", err)
+	if err := vpnnet.EnsureForwarding(); err != nil {
+		return err
 	}
-	_ = datapath.WriteProcSys("net/ipv6/conf/all/forwarding", "1")
 
 	// Create the kernel WireGuard device (idempotent — a restart re-adopts it).
 	link := &netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: wgDev}}
@@ -105,6 +117,11 @@ func run(path string, log *slog.Logger) error {
 	dev, err := netlink.LinkByName(wgDev)
 	if err != nil {
 		return fmt.Errorf("find %s: %w", wgDev, err)
+	}
+	if cfg.MTU > 0 {
+		if err := netlink.LinkSetMTU(dev, cfg.MTU); err != nil {
+			return fmt.Errorf("set %s MTU to %d: %w", wgDev, cfg.MTU, err)
+		}
 	}
 
 	wg, err := wgctrl.New()
@@ -159,7 +176,61 @@ func run(path string, log *slog.Logger) error {
 	return nil
 }
 
+func selectPrivateKey(cfg config, podName string) (string, error) {
+	if len(cfg.PrivateKeys) == 0 {
+		if cfg.PrivateKey == "" {
+			return "", fmt.Errorf("wireguard private key is empty")
+		}
+		return cfg.PrivateKey, nil
+	}
+	if len(cfg.PrivateKeys) == 1 {
+		return cfg.PrivateKeys[0], nil
+	}
+	ordinal, err := podOrdinal(podName)
+	if err != nil {
+		return "", err
+	}
+	if ordinal >= len(cfg.PrivateKeys) {
+		return "", fmt.Errorf("POD_NAME ordinal %d has no configured WireGuard identity", ordinal)
+	}
+	return cfg.PrivateKeys[ordinal], nil
+}
+
+func selectInstancePeers(cfg config, podName string) ([]peer, error) {
+	if len(cfg.PeerInstances) == 0 {
+		return cfg.Peers, nil
+	}
+	if len(cfg.PeerInstances) == 1 {
+		return cfg.PeerInstances[0], nil
+	}
+	ordinal, err := podOrdinal(podName)
+	if err != nil {
+		return nil, err
+	}
+	if ordinal >= len(cfg.PeerInstances) {
+		return nil, fmt.Errorf("POD_NAME ordinal %d has no configured WireGuard peer set", ordinal)
+	}
+	return cfg.PeerInstances[ordinal], nil
+}
+
+func podOrdinal(podName string) (int, error) {
+	separator := strings.LastIndexByte(podName, '-')
+	if separator < 0 || separator == len(podName)-1 {
+		return 0, fmt.Errorf("POD_NAME %q has no StatefulSet ordinal", podName)
+	}
+	ordinal := 0
+	for _, digit := range podName[separator+1:] {
+		if digit < '0' || digit > '9' {
+			return 0, fmt.Errorf("POD_NAME %q has an invalid StatefulSet ordinal", podName)
+		}
+		ordinal = ordinal*10 + int(digit-'0')
+	}
+	return ordinal, nil
+}
+
 const metricsAddr = ":9410"
+
+const wireGuardHandshakeTimeout = 180 * time.Second
 
 // serveMetrics exposes per-connection WireGuard counters in Prometheus text
 // format on metricsAddr. Each scrape reads live kernel state via wgctrl.
@@ -175,14 +246,25 @@ func serveMetrics(wg *wgctrl.Client, names map[wgtypes.Key]string, log *slog.Log
 		b.WriteString("# HELP cozyplane_vpn_connection_rx_bytes_total Bytes received from the peer over the tunnel.\n")
 		b.WriteString("# TYPE cozyplane_vpn_connection_rx_bytes_total counter\n")
 		for i := range dev.Peers {
-			b.WriteString(fmt.Sprintf("cozyplane_vpn_connection_rx_bytes_total{connection=%q} %d\n",
+			b.WriteString(fmt.Sprintf("cozyplane_vpn_connection_rx_bytes_total{connection=%q,backend=\"wireguard\"} %d\n",
 				connLabel(names, dev.Peers[i].PublicKey), dev.Peers[i].ReceiveBytes))
 		}
 		b.WriteString("# HELP cozyplane_vpn_connection_tx_bytes_total Bytes sent to the peer over the tunnel.\n")
 		b.WriteString("# TYPE cozyplane_vpn_connection_tx_bytes_total counter\n")
 		for i := range dev.Peers {
-			b.WriteString(fmt.Sprintf("cozyplane_vpn_connection_tx_bytes_total{connection=%q} %d\n",
+			b.WriteString(fmt.Sprintf("cozyplane_vpn_connection_tx_bytes_total{connection=%q,backend=\"wireguard\"} %d\n",
 				connLabel(names, dev.Peers[i].PublicKey), dev.Peers[i].TransmitBytes))
+		}
+		b.WriteString("# HELP cozyplane_vpn_connection_up Whether the WireGuard peer has handshaked within the last 180 seconds.\n")
+		b.WriteString("# TYPE cozyplane_vpn_connection_up gauge\n")
+		now := time.Now()
+		for i := range dev.Peers {
+			up := 0
+			if !dev.Peers[i].LastHandshakeTime.IsZero() && now.Sub(dev.Peers[i].LastHandshakeTime) <= wireGuardHandshakeTimeout {
+				up = 1
+			}
+			b.WriteString(fmt.Sprintf("cozyplane_vpn_connection_up{connection=%q,backend=\"wireguard\"} %d\n",
+				connLabel(names, dev.Peers[i].PublicKey), up))
 		}
 		b.WriteString("# HELP cozyplane_vpn_connection_last_handshake_timestamp_seconds Unix time of the peer's last handshake (0 if none).\n")
 		b.WriteString("# TYPE cozyplane_vpn_connection_last_handshake_timestamp_seconds gauge\n")
@@ -191,10 +273,29 @@ func serveMetrics(wg *wgctrl.Client, names map[wgtypes.Key]string, log *slog.Log
 			if !dev.Peers[i].LastHandshakeTime.IsZero() {
 				ts = dev.Peers[i].LastHandshakeTime.Unix()
 			}
-			b.WriteString(fmt.Sprintf("cozyplane_vpn_connection_last_handshake_timestamp_seconds{connection=%q} %d\n",
+			b.WriteString(fmt.Sprintf("cozyplane_vpn_connection_last_handshake_timestamp_seconds{connection=%q,backend=\"wireguard\"} %d\n",
 				connLabel(names, dev.Peers[i].PublicKey), ts))
 		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		_, _ = w.Write([]byte(b.String()))
+	})
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		dev, err := wg.Device(wgDev)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(wireGuardSnapshot(dev, names, time.Now())); err != nil {
+			log.Warn("encode status", "err", err)
+		}
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := wg.Device(wgDev); err != nil {
+			http.Error(w, "WireGuard device unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 	})
 	srv := &http.Server{
 		Addr:              metricsAddr,
@@ -206,6 +307,30 @@ func serveMetrics(wg *wgctrl.Client, names map[wgtypes.Key]string, log *slog.Log
 	if err := srv.ListenAndServe(); err != nil {
 		log.Error("metrics server stopped", "err", err)
 	}
+}
+
+func wireGuardSnapshot(dev *wgtypes.Device, names map[wgtypes.Key]string, now time.Time) vpnstatus.Snapshot {
+	s := vpnstatus.Snapshot{
+		Backend:     "wireguard",
+		ObservedAt:  now.UTC(),
+		Connections: make(map[string]vpnstatus.Connection, len(dev.Peers)),
+	}
+	for i := range dev.Peers {
+		p := &dev.Peers[i]
+		last := int64(0)
+		up := false
+		if !p.LastHandshakeTime.IsZero() {
+			last = p.LastHandshakeTime.Unix()
+			up = now.Sub(p.LastHandshakeTime) <= wireGuardHandshakeTimeout
+		}
+		s.Connections[connLabel(names, p.PublicKey)] = vpnstatus.Connection{
+			Up:                up,
+			LastHandshakeUnix: last,
+			RXBytes:           uint64(p.ReceiveBytes),
+			TXBytes:           uint64(p.TransmitBytes),
+		}
+	}
+	return s
 }
 
 // connLabel maps a peer's public key to its connection name, falling back to the

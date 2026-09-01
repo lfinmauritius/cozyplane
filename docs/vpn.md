@@ -1,6 +1,8 @@
 # Site-to-site VPN — design proposal (issue #6)
 
-**Status: implemented through increments 0-3; increment 4 is partial and the remaining limitations are called out in §10.**
+**Status: implemented in increments — §10 distinguishes code-complete/local
+validation from tests that still require an external firewall, BGP peer or a
+KubeVirt migration environment.**
 
 This document proposes VPN termination for VPCs: site-to-site tunnels (WireGuard,
 then IPsec/IKEv2) between a tenant's remote network and their VPC, and — as a later
@@ -92,9 +94,9 @@ The `feat/kubevirt-multi-nic` line of work delivers, today, everything a
   each of two VPCs, declared the door of both — ICMP at 0% loss, TCP gated by
   the source VPC's egress rule *and* the destination VPC's ingress rule.
 
-So a tenant can already run strongSwan or WireGuard in a VM, declare it their
-VPC's door, and have a working site-to-site VPN. Two things make this an
-incomplete answer:
+When this proposal was written, a tenant could already run strongSwan or
+WireGuard in a VM and declare it their VPC's door, but two gaps made that an
+incomplete answer. Both are now implemented in the increments in section 10:
 
 1. **The door is all-or-nothing.** `gateways[vni]` is a single entry: declaring
    the VPN appliance the door sends *all* off-VPC traffic through it, displacing
@@ -104,17 +106,15 @@ incomplete answer:
    remote site would be NAT'd toward the internet instead of reaching the
    tunnel. There is no way today to say "these prefixes go to the appliance,
    everything else behaves as before." That is the route table (§3.1).
-2. **Nobody operates the tunnel for you.** Option 1 of #6 — cozyplane
-   orchestrating the appliance and its tunnel config — is unbuilt (§3.2).
+2. **Nobody operated the tunnel for you.** Option 1 of #6 — cozyplane
+   orchestrating the appliance and its tunnel config — was still unbuilt
+   (§3.2).
 
-Known debts on the built half, owed regardless of this proposal (increment 0,
-§8): no automated e2e phase exercises `spec.appliance` or `allowForwarding`
-(unit tests plus recorded manual validation only); north-south metering
-attributes a forwarding leg's traffic to `door="gateway"` (flagged in
-`docs/multi-attach.md` §5); and `Port.spec.forwarding`'s doc comment still
-describes the pre-fix `PORT_F_GATEWAY` reuse that `3ca5e70` corrected.
+The original debts on the built half are recorded in increment 0 and are now
+closed: automated appliance/forwarding e2e coverage, correct north-south
+`door="appliance"` metering, and corrected forwarding documentation.
 
-## 3. What remains to design
+## 3. Design implemented
 
 ### 3.1 The per-VPC route table
 
@@ -239,6 +239,7 @@ spec:
 status:
   phase: Established
   lastHandshake: "2026-08-24T10:11:12Z"
+  observedAt: "2026-08-24T10:11:13Z"
   conditions: [Established, RoutesProgrammed]
 ```
 
@@ -247,8 +248,9 @@ The IPsec variant swaps the tunnel block:
 ```yaml
   ipsec:
     peerAddress: 203.0.113.10
+    startAction: Start                 # peer side uses None to avoid duplicate SAs
     auth:
-      psk: {secretRef: {name: office-paris-psk}}   # certificates: later increment
+      psk: {secretRef: {name: site-a-psk}}         # certificate and EAP auth are also supported
     ike:
       proposals: ["aes256gcm16-prfsha384-ecp384"]  # sane defaults when omitted
       dpdDelay: 30s
@@ -276,7 +278,12 @@ twelve, owning:
   `VPCGateway`'s explicit `spec.routes` and the `remoteCIDRs` of every Ready
   `VPNConnection`. Longest prefix wins; an exact-prefix conflict between the two
   sources is refused with a condition, never resolved silently.
-- **status**: handshake/SA state read back from the kernel via the shim.
+- **status**: the controller reads the selected appliance's secret-free `/status`
+  endpoint every 15 seconds (every second for an HA gateway). `Established`
+  requires both programmed routes and
+  a live WireGuard handshake/IPsec CHILD-SA; `Down` distinguishes a materialized
+  route with no tunnel, and `observedAt` makes staleness visible. The same source
+  feeds the metrics endpoint (§6).
 
 **The endpoint address.** The tunnel endpoint is the one address in this design
 a *remote* system pins in its configuration — a firewall names its IKE peer by
@@ -332,15 +339,46 @@ traffic is delivered natively, and a router cannot serve two owners of one
 prefix. Overlapping CIDRs remain fully supported between VPCs that do not share
 a hub.
 
-### 3.4 Roadwarrior (deferred increment)
+### 3.4 Roadwarrior
 
-Individual clients — native IKEv2 on Windows/macOS/iOS, or per-device WireGuard
-peers — reduce almost entirely to the site-to-site machinery: a per-VPC virtual
-address pool is just a `remoteCIDRs` entry routed at the appliance, and each
-device is a peer. What it adds is address management (lease/assignment inside
-the pool) and, for IKEv2, EAP or per-device certificate identity. Deliberately
-deferred: design when site-to-site has proven the base, in this document's
-successor.
+Individual IKEv2 clients reuse `VPNConnection`; no second lease controller or
+shadow identity API is introduced. An IPsec gateway declares non-overlapping,
+named address pools and an optional cert-manager-compatible TLS Secret:
+
+```yaml
+spec:
+  ipsec:
+    credentialSecretRef: gateway-ike-tls # tls.crt, tls.key, optional ca.crt
+    trustedCASecretRef: client-ca        # ca.crt; needed for client certificates
+    localIdentity: vpn.example.invalid
+    addressPools:
+    - name: clients-v4
+      cidr: 10.250.0.0/24
+      dns: [10.0.0.53]
+```
+
+Each client is one revocable `VPNConnection`. Its IPsec authentication is
+exactly one of PSK, a certificate identity, or EAP credentials. EAP and client
+certificate connections select one gateway pool and are responder-only:
+
+```yaml
+spec:
+  gatewayRef: {name: site-vpn}
+  ipsec:
+    addressPool: clients-v4
+    auth:
+      eap:
+        identity: device-001
+        secretRef: device-001-eap # data.password
+```
+
+The controller reads referenced Secrets, projects credentials only into the
+appliance's config Secret, and adds the selected pool CIDR to the scoped
+forwarding grant and VPC route table. The appliance loads certificates, keys,
+EAP secrets and pools directly over VICI. strongSwan owns online/offline leases;
+the live status reports assigned virtual IPs. Deleting the connection removes
+the credential and connection on the next immutable-config rollout, which is
+the revocation boundary. Secret contents never enter API status or metrics.
 
 ### 3.5 High availability — a three-tier stack, not one switch
 
@@ -443,13 +481,20 @@ what was done:
   binds the child to the context, not the reverse, so a charon that crashed on its
   own left a live pod with a dead tunnel). The process now waits on charon and
   exits non-zero if it dies, so the kubelet restarts the pair.
-- **Accepted / owed — appliance runs `privileged`**: the functional need is only
-  `NET_ADMIN`+`NET_RAW`+`NET_BIND_SERVICE`, but writing `net.ipv4.ip_forward`
-  needs a writable `/proc/sys`, which a non-privileged container gets only where
-  the kubelet allows that unsafe sysctl. The capability-drop hardening is owed
-  once the platform guarantees `allowed-unsafe-sysctls` (or the forwarding sysctls
-  move to pod-level `securityContext.sysctls`); meanwhile the blast radius is
-  bounded to the dedicated gateway node-pool (§3.5, increment 6).
+- **Capability-bounded mode is available, compatibility mode remains the
+  default.** `--vpn-hardened-appliance` (chart
+  `vpn.hardenedAppliance`) moves forwarding to pod-level sysctls, drops all
+  capabilities, and adds only `NET_ADMIN`+`NET_RAW`+`NET_BIND_SERVICE` with
+  privilege escalation disabled. Enable it only after the kubelet admits the two
+  forwarding sysctls; clusters that do not retain the privileged compatibility
+  path and should isolate it on the dedicated gateway node-pool.
+- **Tunnel MTU derives from `VPC.spec.mtu`.** The controller subtracts a
+  conservative worst-case outer overhead (80 bytes for WireGuard, 128 for
+  ESP-in-UDP) and configures the WireGuard/xfrm interface accordingly. This
+  gives the kernel a correct PMTU boundary on paths stacking Geneve and VPN
+  encapsulation. The datapath also clamps oversized MSS options on bare TCP SYNs
+  before VPN, FloatingIP, Geneve and DSR encapsulation; PMTU remains the fallback
+  for non-TCP traffic.
 - **Owed — controller holds cluster-wide `secrets` + `vpcs/export`**: the managed
   model has the controller create the keypair/config Secrets and the forwarding
   grant on the tenant's behalf, so it is a trusted cluster component (like the
@@ -472,20 +517,33 @@ Two layers, cleanly split:
   exactly as `docs/multi-attach.md` §5 prescribes. This closes the documented
   "forwarding traffic reads as `door="gateway"`" gap for every appliance, VPN or
   not.
-- **Tunnel**: per-connection counters read from kernel state (WireGuard transfer
-  counters, xfrm SA byte counts) and exported by the shim —
-  `cozyplane_vpn_connection_{rx,tx}_bytes_total{vpc_namespace, vpc, gateway,
-  connection}` plus a handshake-age/SA-state gauge. The datapath never learns
-  what a "connection" is.
+- **Tunnel**: both shims expose Prometheus metrics on `:9410/metrics`, with one
+  series per `VPNConnection`. WireGuard reads peer state through `wgctrl`; IPsec
+  streams live IKE/CHILD-SA state through VICI and aggregates all active/rekeyed
+  SAs belonging to the connection. The common byte metrics are
+  `cozyplane_vpn_connection_{rx,tx}_bytes_total{connection}`; IPsec adds
+  `backend="ipsec"` to its series and also
+  exports packet totals and `cozyplane_vpn_connection_up`; both backends expose
+  `cozyplane_vpn_connection_last_handshake_timestamp_seconds`. Kubernetes pod
+  discovery adds the namespace, pod and gateway labels at scrape time. The
+  controller publishes the scrape annotations and named `vpn-metrics` port for
+  both backends. When the VictoriaMetrics Operator CRD is available, the chart
+  installs a cross-namespace `VMPodScrape` selecting only
+  `app=cozyplane-vpn-gateway`. The datapath never learns what a "connection" is.
 
 ## 7. MTU
 
+TCP SYNs entering a VPN route or Geneve north-south path have an advertised MSS
+above the conservative encapsulation-safe ceiling reduced in eBPF. The bounded
+TCP-option walk leaves absent/smaller MSS values, SYN+ACK, UDP and ICMP intact;
+PMTU signalling remains the fallback for every other packet.
+
 Tunnel overhead (WireGuard 60 bytes, ESP with NAT-T encapsulation ~73) stacks
 with Geneve's 50 wherever the decrypted path crosses nodes. `VPC.spec.mtu`
-already exists and is advertised to guests; v1 documents the arithmetic and
-recommends the setting. TCP-MSS clamping at the encapsulating node is the same
-open debt `docs/floating-ha.md` §7 carries for floating-IP inbound — one
-solution, applied once, for both; this proposal adds a consumer, not a fork.
+already exists and is advertised to guests. The shared MSS implementation is
+applied once at the encapsulating boundary for VPN routes, FloatingIPs,
+north-south Geneve and DSR. Its bounded option parser and every tc entry point
+are loaded through the kernel verifier in CI.
 
 ### 7.1 Kernel prerequisites (and the Cozystack/Talos ask)
 
@@ -493,35 +551,42 @@ Both appliance backends terminate crypto in the kernel, so each has a
 compile-time kernel dependency. These are node-image properties, not things a
 workload can set at runtime:
 
-| Backend | Requires | Stock Cozystack/Talos v1.13.6 (kernel 6.18.38) |
+| Backend | Requires | Validated Talos v1.13.6 image (kernel 6.18.38) |
 |---------|----------|-----------------------------------------------|
-| WireGuard | `CONFIG_WIREGUARD` | **present** (`=y`) — works as shipped |
-| IPsec (route-based) | `CONFIG_XFRM_INTERFACE` | **missing** (`is not set`) — blocks the data path |
+| WireGuard | `CONFIG_WIREGUARD` | **present** (`=y`) |
+| IPsec (route-based) | `CONFIG_XFRM_INTERFACE` | **present** (`=y`) |
 
 `CONFIG_XFRM_INTERFACE` is mainline since Linux 4.19 and is the portable way to
 do route-based IPsec — chosen precisely so the backend is not tied to one distro.
-The gap is that Talos does not enable it by default. The upstream ask is
-therefore small and standard: **build the Cozystack/Talos kernel with
-`CONFIG_XFRM_INTERFACE=m` (or `=y`)** (a `siderolabs/pkgs` kernel-config change,
-not a machine-config knob — it is compile-time). Until then the IPsec backend
-fails closed and loud on those nodes (§10.3), and WireGuard is the recommended
-backend. No policy-based fallback is shipped: it would run on the stock kernel
-but pull ESP policy into the datapath, which the route-based design exists to
-avoid.
+The option is compile-time, not a machine-config knob. If a Talos image builds
+it as a module (`=m`), that module must also be included in the boot artifact and
+loaded. The validated cluster image builds it in (`=y`). The appliance still
+fails closed and loud when the runtime capability is unavailable (§10.3). No
+policy-based fallback is shipped because it would pull ESP policy into the
+datapath, which the route-based design exists to avoid.
 
 ## 8. Testing
 
-- **Increment 0** (owed already): a `test/vpc-e2e.sh` phase for
-  `spec.appliance` + `allowForwarding` — the two-VPC router walk that today
-  exists only as unit tests and prose.
+- **Increment 0**: `test/vpc-e2e.sh` exercises `spec.appliance` and
+  `allowForwarding` with the two-VPC router path.
 - **Route table**: e2e with both doors live — internet egress via NAT identity,
   a routed prefix via the appliance, and the boundary cases (route to an
   ungranted Port is inert; longest-prefix override; route removal restores NAT).
-- **WireGuard**: full e2e is feasible with a genuinely off-cluster peer — a
-  netns or container *outside* the kind network, closing the gap `test/e2e.sh`'s
-  docker-network "external" clients papered over.
-- **IPsec**: strongSwan-to-strongSwan e2e in CI; interop with commercial
-  firewalls is a documented manual matrix, not CI.
+- **WireGuard**: a live two-gateway tunnel is exercised with application traffic
+  across distinct VPCs; an independently managed off-cluster peer remains a CI
+  follow-up.
+- **IPsec**: a live strongSwan-to-strongSwan IKEv2/ESP/NAT-T pair is exercised
+  across distinct VPCs with application traffic and per-connection metrics.
+  Interop with commercial firewalls remains a documented manual matrix, not CI.
+- **Reusable CI harness**: `test/vpn-e2e.sh` creates a throw-away namespace,
+  generates its WireGuard PSK or IPsec PSK at runtime, and drives a managed
+  gateway pair through application traffic. `BACKEND=wireguard|ipsec` and
+  `KCTX` make the same suite run after `test/e2e.sh` on kind and against the
+  dedicated laboratory context. `MODE=materialize` validates kind's control
+  plane and route realization without inventing external endpoint allocation;
+  `MODE=live` requires the laboratory FloatingIP allocator and verifies the
+  handshake and traffic. The separate self-hosted job owns Talos and any
+  physical-lab validation.
 - Unit tests follow the house pattern: one `_test.go` per reconciler,
   fake-client, small builders. No manifest-grepping drift guards.
 
@@ -534,18 +599,16 @@ avoid.
 2. **Route target shape.** `via.podSelector` (symmetric with `spec.appliance`)
    vs. an explicit `portRef`. Selector proposed; it survives rescheduling
    without an intermediary.
-3. **HA.** The three-tier stack is in §3.5 (live migration for planned,
-   WireGuard warm standby for cheap crash near-zero, dual-tunnel + BGP for true
-   crash zero-drop). v1 ships a single appliance (accepts a reschedule
-   interruption); which tier becomes the default, and whether the failover
-   controller (health-check → flip FloatingIP + route) is v1 or a later
-   increment, is the open call.
+3. **HA default.** All three tiers in §3.5 are selectable; the default stays a
+   single pod. Operators choose warm standby, KubeVirt live migration, or
+   active-active BGP/BFD explicitly because their infrastructure and remote-peer
+   contracts differ.
 4. **Appliance image.** A new `cozyplane-vpn-appliance` image (strongSwan +
    shim) is a real maintenance surface — version pinning, CVE cadence. Who owns
    it, and does WireGuard-only v1 ship without strongSwan at all?
-5. **Certificates for IKEv2.** PSK first; a cert story (and whether cozyplane
-   fronts a per-VPC CA or consumes cert-manager) belongs to the roadwarrior
-   increment.
+5. **Certificate authority ownership.** Certificate/EAP authentication and
+   address pools consume namespace Secrets (including cert-manager TLS Secrets).
+   Cozyplane intentionally does not operate a per-VPC CA.
 
 ## 10. Increments
 
@@ -621,14 +684,17 @@ avoid.
      declaring a cluster-internal CIDR (pod/service/node) as remote is not yet
      rejected; only the managed appliance (not tenant code) forwards under the
      grant, but the deny-set is owed before this is enabled by default.
-   - **Not exercised on kind**: a real off-cluster peer completing a handshake
-     (the e2e used a synthetic peer key + unreachable endpoint); the crypto data
-     path across a live remote is the remaining verification.
+   - Validated on the Talos/Cozystack cluster with two managed gateways: the
+     WireGuard handshake completed and application traffic crossed from one VPC
+     workload to the other. An independently managed off-cluster peer remains a
+     portability/interop follow-up.
 3. **[DONE] Managed IPsec site-to-site** — the enterprise-interop backend,
    sharing every control-plane mechanism with the WireGuard one:
    - `VPNGateway.spec.ipsec` (`{proposals}`) selects the backend; the connection
      carries `VPNConnection.spec.ipsec` (`{peerAddress, auth.pskSecretRef,
-     proposals, dpdDelay}`). Exactly one of `wireguard`/`ipsec` per gateway.
+     proposals, dpdDelay, startAction}`). `startAction: Start|None` elects one
+     initiator for managed pairs; unset preserves the historical address-based
+     behavior. Exactly one of `wireguard`/`ipsec` per gateway.
    - the controller (`backendOf`, `buildIPsecConfig`) renders the same objects as
      the WG path — scoped `VPCBinding`, `FloatingIP`, `status.routes` — but a
      `cozyplane-vpn-gateway-ipsec` appliance and a PSK-bearing config Secret (the
@@ -656,24 +722,19 @@ avoid.
      non-zero — rather than bringing IKE up over a tunnel that can carry no
      traffic. So a node without it shows an unmistakable `CrashLoopBackOff` +
      message, never a silent dead tunnel.
-   - **Platform gap (verified, owed upstream).** A live Cozystack v1.13.6 cluster
-     (Talos kernel **6.18.38**) does **not** compile it in — `ip link add type
-     xfrm` → "Unknown device type", `CONFIG_XFRM_INTERFACE is not set`,
-     `CONFIG_NET_IPVTI is not set` (no VTI fallback either). The base framework is
-     present (`CONFIG_XFRM`, `CONFIG_XFRM_USER`, `CONFIG_INET_ESP`, `ip xfrm
-     state/policy` all work) and `CONFIG_WIREGUARD=y`. So on stock Cozystack/Talos
-     the **WireGuard backend works as shipped** and the IPsec backend needs the
-     node kernel to enable the standard option first — an **upstream ask to
-     Cozystack/Talos to add `CONFIG_XFRM_INTERFACE`** to their kernel build (see
-     §7.1). Policy-based IPsec is explicitly **not** the answer: it would work on
-     the stock kernel but drag ESP policy into the datapath, defeating the clean,
-     portable route-based design.
-   - Same **known limitation** as increment 2: `remoteCIDRs` need the route-CIDR
-     deny-set before enable-by-default. **Not exercised end to end**: a real
-     off-cluster IKE peer completing a handshake + ESP across `xfrm` — blocked
-     until the node kernel carries `CONFIG_XFRM_INTERFACE`.
-4. **[PARTIAL] HA + resource guardrails** (§3.5) — the buildable, verifiable
-   tiers landed; the crypto-cooperative tiers stay designed:
+	- **Platform validation.** The deployed Talos v1.13.6 image (kernel
+	  **6.18.38**) reports `CONFIG_XFRM_INTERFACE=y`, together with `CONFIG_XFRM`,
+	  `CONFIG_XFRM_USER`, `CONFIG_INET_ESP`, `CONFIG_INET6_ESP` and
+	  `CONFIG_WIREGUARD`. A limited userspace `ip` binary reporting "Unknown device
+	  type" is not a valid kernel-capability test; the appliance preflight uses
+	  netlink directly and successfully creates the interface. Images that build
+	  the option as `=m` must ship and load the matching signed module.
+   - Validated end to end on the Talos/Cozystack cluster: two managed peers
+     established IKEv2 and CHILD SAs over ESP-in-UDP/NAT-T, and application HTTP
+     traffic crossed the xfrm interfaces between distinct VPCs. The route-CIDR
+     deny-set is enforced before materialization. Commercial-firewall and
+     independently managed off-cluster interop remain manual follow-ups.
+4. **[IMPLEMENTED] HA + resource guardrails** (§3.5):
    - **[DONE] Tier-2 warm standby**: `VPNGateway.spec.highAvailability` runs the
      appliance as two same-identity replicas (shared config Secret) anti-affined
      across nodes. A node loss costs one handshake, not a reschedule — the
@@ -689,15 +750,33 @@ avoid.
      over-quota gateway with a `QuotaExceeded` condition before it materializes.
      Verified: limits present on the appliance; a 2nd connection past the cap was
      rejected in status.
-   - **[DESIGN] Tier-1 (live-migration)**: appliance as a KubeVirt VM so a node
-     drain live-migrates the crypto state (reuse `PersistentPortReconciler` +
-     `migrate_fwd`). **[DESIGN] Tier-3 (zero-drop crash)**: dual active tunnels +
-     BGP/BFD (FRR in the appliance netns), a `redundant`/`bgp` gateway mode. Both
-     need infrastructure absent from the kind dev cluster (KubeVirt for the VM
-     appliance; a cooperating BGP peer) and are the next follow-ups; §3.5 holds
-     the full design.
-5. **Roadwarrior**: IKEv2 EAP/certs, per-device WireGuard, per-VPC address
-   pools. Own design doc.
+   - **[DONE] Readiness-aware selection**: both appliances expose `/readyz`; the
+     Deployment probes it every second and route/FloatingIP resolution considers
+     only Ready pods. A process without a WireGuard device or responsive VICI
+     session cannot become the selected next hop. HA gateways also poll live
+     status every second, bounding process-level detection to the requested
+     three-second window; node-loss detection still depends on Kubernetes node
+     health and is not claimed as a three-second SLO.
+   - **[IMPLEMENTED, INFRA VALIDATION REQUIRED] Tier-1**:
+     `ha.mode=LiveMigration` reconciles a KubeVirt `VirtualMachine` with
+     `evictionStrategy=LiveMigrate`, bridge pod networking, an RWX state PVC,
+     a digest-pinnable containerDisk and controller-owned cloud-init. The image
+     builder installs both VPN binaries and a systemd dispatcher. A real drain
+     test still requires an RWX StorageClass and a built/published appliance
+     image in the target cluster.
+   - **[IMPLEMENTED, PEER VALIDATION REQUIRED] Tier-3**:
+     `ha.mode=ActiveActive` creates two stable StatefulSet members, distinct
+     WireGuard identities (or independent IPsec SAs), two FloatingIPs, two route
+     next-hops and an FRR BGP/BFD sidecar. `vpc_routes` performs deterministic
+     two-way ECMP. WireGuard connections may supply ordered `peerPublicKeys` and
+     `peerEndpoints`; status publishes both local keys and endpoints. Unit,
+     build and kernel-verifier checks pass; loss-free failover still requires a
+     cooperating external BGP/BFD peer.
+5. **[IMPLEMENTED] Roadwarrior**: IPsec certificate and EAP authentication,
+   cert-manager-compatible TLS Secrets, named per-VPC address pools, VICI-loaded
+   credentials/pools and assigned-address status. Per-device WireGuard remains
+   expressible as ordinary `VPNConnection` peers and is intentionally not a
+   separate credential authority.
 
 Docs before code at every step, per the house rule — each increment updates this
 document and `docs/roadmap.md` as part of the change, not after.

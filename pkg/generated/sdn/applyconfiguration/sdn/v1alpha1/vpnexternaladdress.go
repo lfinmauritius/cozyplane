@@ -32,6 +32,9 @@ type VPNExternalAddressApplyConfiguration struct {
 	// endpoint should wear. Reserving it matters for IPsec, whose remote peer
 	// pins the endpoint address (docs/vpn.md §3.2). Empty means dynamic.
 	AddressClaimName *string `json:"addressClaimName,omitempty"`
+	// AddressClaimNames reserves one stable endpoint per active-active appliance.
+	// It must contain exactly two distinct names in ActiveActive mode.
+	AddressClaimNames []string `json:"addressClaimNames,omitempty"`
 }
 
 // VPNExternalAddressApplyConfiguration constructs a declarative configuration of the VPNExternalAddress type for use with
@@ -53,5 +56,15 @@ func (b *VPNExternalAddressApplyConfiguration) WithLoadBalancerClass(value strin
 // If called multiple times, the AddressClaimName field is set to the value of the last call.
 func (b *VPNExternalAddressApplyConfiguration) WithAddressClaimName(value string) *VPNExternalAddressApplyConfiguration {
 	b.AddressClaimName = &value
+	return b
+}
+
+// WithAddressClaimNames adds the given value to the AddressClaimNames field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the AddressClaimNames field.
+func (b *VPNExternalAddressApplyConfiguration) WithAddressClaimNames(values ...string) *VPNExternalAddressApplyConfiguration {
+	for i := range values {
+		b.AddressClaimNames = append(b.AddressClaimNames, values[i])
+	}
 	return b
 }

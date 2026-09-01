@@ -92,10 +92,13 @@ rules:
   # launcher-pod signal without it.
   - apiGroups: ["kubevirt.io"]
     resources: ["virtualmachineinstances"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Gateway Deployments for a pool-less VPCGateway (a pooled one is pure eBPF).
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
   # Severed-gateway heal: recreate a Ready gateway pod whose .1 Port is gone.
   # watch: the persistent-Port controller watches virt-launcher pods to drive

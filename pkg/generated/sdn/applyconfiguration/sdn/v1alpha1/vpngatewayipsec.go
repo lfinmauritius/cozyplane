@@ -30,6 +30,19 @@ type VPNGatewayIPsecApplyConfiguration struct {
 	// their own (strongSwan proposal syntax, e.g. "aes256-sha256-modp2048").
 	// Empty lets charon negotiate its defaults.
 	Proposals []string `json:"proposals,omitempty"`
+	// CredentialSecretRef names a cert-manager-compatible TLS Secret containing
+	// tls.crt and tls.key. ca.crt in the same Secret is accepted as the trust
+	// anchor when TrustedCASecretRef is empty.
+	CredentialSecretRef *string `json:"credentialSecretRef,omitempty"`
+	// TrustedCASecretRef names a Secret containing ca.crt used to authenticate
+	// certificate-based remote peers.
+	TrustedCASecretRef *string `json:"trustedCASecretRef,omitempty"`
+	// LocalIdentity is the IKE identity presented by the gateway. Empty lets
+	// strongSwan derive it from the selected certificate.
+	LocalIdentity *string `json:"localIdentity,omitempty"`
+	// AddressPools are non-overlapping virtual-IP pools available to roadwarrior
+	// connections. A connection selects one by name.
+	AddressPools []VPNIPsecAddressPoolApplyConfiguration `json:"addressPools,omitempty"`
 }
 
 // VPNGatewayIPsecApplyConfiguration constructs a declarative configuration of the VPNGatewayIPsec type for use with
@@ -44,6 +57,43 @@ func VPNGatewayIPsec() *VPNGatewayIPsecApplyConfiguration {
 func (b *VPNGatewayIPsecApplyConfiguration) WithProposals(values ...string) *VPNGatewayIPsecApplyConfiguration {
 	for i := range values {
 		b.Proposals = append(b.Proposals, values[i])
+	}
+	return b
+}
+
+// WithCredentialSecretRef sets the CredentialSecretRef field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the CredentialSecretRef field is set to the value of the last call.
+func (b *VPNGatewayIPsecApplyConfiguration) WithCredentialSecretRef(value string) *VPNGatewayIPsecApplyConfiguration {
+	b.CredentialSecretRef = &value
+	return b
+}
+
+// WithTrustedCASecretRef sets the TrustedCASecretRef field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the TrustedCASecretRef field is set to the value of the last call.
+func (b *VPNGatewayIPsecApplyConfiguration) WithTrustedCASecretRef(value string) *VPNGatewayIPsecApplyConfiguration {
+	b.TrustedCASecretRef = &value
+	return b
+}
+
+// WithLocalIdentity sets the LocalIdentity field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the LocalIdentity field is set to the value of the last call.
+func (b *VPNGatewayIPsecApplyConfiguration) WithLocalIdentity(value string) *VPNGatewayIPsecApplyConfiguration {
+	b.LocalIdentity = &value
+	return b
+}
+
+// WithAddressPools adds the given value to the AddressPools field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the AddressPools field.
+func (b *VPNGatewayIPsecApplyConfiguration) WithAddressPools(values ...*VPNIPsecAddressPoolApplyConfiguration) *VPNGatewayIPsecApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithAddressPools")
+		}
+		b.AddressPools = append(b.AddressPools, *values[i])
 	}
 	return b
 }

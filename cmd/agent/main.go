@@ -1090,31 +1090,44 @@ func watchRoutes(ctx context.Context, factory sdninformers.SharedInformerFactory
 	// its IP and node. An unresolved or off-node-address route is skipped.
 	resolveRoutes := func(routes []sdnv1alpha1.VPCGatewayRouteStatus, out *[]datapath.RouteEntry) {
 		for _, rt := range routes {
-			if rt.Port == "" {
+			portNames := append([]string(nil), rt.Ports...)
+			if len(portNames) == 0 && rt.Port != "" {
+				portNames = []string{rt.Port}
+			}
+			if len(portNames) == 0 {
 				continue // unresolved route: no datapath entry
 			}
-			port, err := ports.Lister().Get(rt.Port)
-			if err != nil || port.Spec.IP == "" {
-				continue
-			}
-			vni, ok := vniFromPortName(port.Name)
-			if !ok {
-				continue
-			}
-			gwIP := net.ParseIP(port.Spec.IP)
-			if gwIP == nil {
-				continue
-			}
-			var nodeIP net.IP
-			if port.Spec.Node != selfName {
-				nodeIP = net.ParseIP(port.Spec.NodeIP)
-				if nodeIP == nil {
+			var vni uint32
+			var nextHops []datapath.RouteNextHop
+			for _, portName := range portNames {
+				port, err := ports.Lister().Get(portName)
+				if err != nil || port.Spec.IP == "" {
 					continue
 				}
+				portVNI, ok := vniFromPortName(port.Name)
+				if !ok || (vni != 0 && portVNI != vni) {
+					continue
+				}
+				vni = portVNI
+				gwIP := net.ParseIP(port.Spec.IP)
+				if gwIP == nil {
+					continue
+				}
+				var nodeIP net.IP
+				if port.Spec.Node != selfName {
+					nodeIP = net.ParseIP(port.Spec.NodeIP)
+					if nodeIP == nil {
+						continue
+					}
+				}
+				nextHops = append(nextHops, datapath.RouteNextHop{GwIP: gwIP, NodeIP: nodeIP})
+			}
+			if len(nextHops) == 0 {
+				continue
 			}
 			for _, cidr := range rt.CIDRs {
 				*out = append(*out, datapath.RouteEntry{
-					Scope: vni, CIDR: cidr, GwIP: gwIP, NodeIP: nodeIP,
+					Scope: vni, CIDR: cidr, NextHops: append([]datapath.RouteNextHop(nil), nextHops...),
 				})
 			}
 		}

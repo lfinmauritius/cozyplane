@@ -23,6 +23,9 @@ import (
 // VPNGatewayPhase is the lifecycle phase of a VPNGateway.
 type VPNGatewayPhase string
 
+// VPNGatewayHAMode selects the failure model of the managed appliance.
+type VPNGatewayHAMode string
+
 const (
 	// VPNGatewayPhasePending means the tunnel endpoint is declared but not yet
 	// realized (no external address, or the appliance is not up).
@@ -30,6 +33,53 @@ const (
 	// VPNGatewayPhaseReady means the endpoint has an address and is serving.
 	VPNGatewayPhaseReady VPNGatewayPhase = "Ready"
 )
+
+const (
+	// VPNGatewayHAModeWarmStandby runs two pods but exposes one selected endpoint.
+	VPNGatewayHAModeWarmStandby VPNGatewayHAMode = "WarmStandby"
+	// VPNGatewayHAModeLiveMigration runs the appliance as a migratable KubeVirt VM.
+	VPNGatewayHAModeLiveMigration VPNGatewayHAMode = "LiveMigration"
+	// VPNGatewayHAModeActiveActive runs two tunnel endpoints and ECMP next-hops.
+	VPNGatewayHAModeActiveActive VPNGatewayHAMode = "ActiveActive"
+)
+
+// VPNGatewayActiveActive configures the remote dynamic-routing contract. FRR
+// runs beside each tunnel appliance in the same network namespace.
+type VPNGatewayActiveActive struct {
+	// LocalASN is the private or public ASN advertised by both appliances.
+	LocalASN int64 `json:"localASN"`
+	// PeerASN is the remote router's ASN.
+	PeerASN int64 `json:"peerASN"`
+	// PeerAddresses are BGP neighbor addresses reachable through the tunnels.
+	// +listType=atomic
+	PeerAddresses []string `json:"peerAddresses"`
+	// BFD enables fast failure detection for every neighbor.
+	// +optional
+	BFD bool `json:"bfd,omitempty"`
+}
+
+// VPNGatewayVirtualMachine configures the managed KubeVirt appliance form
+// factor. The image must be a bootable containerDisk built from images/vpn-appliance.
+type VPNGatewayVirtualMachine struct {
+	Image string `json:"image"`
+	// StateClaimName is an existing RWX PVC used by both migration endpoints.
+	StateClaimName string `json:"stateClaimName"`
+	// CloudInitSecretRef optionally names operator-managed user data. Empty uses
+	// controller-generated cloud-init containing the current tunnel config.
+	// +optional
+	CloudInitSecretRef string `json:"cloudInitSecretRef,omitempty"`
+}
+
+// VPNGatewayHA configures one explicit HA tier.
+type VPNGatewayHA struct {
+	Mode VPNGatewayHAMode `json:"mode"`
+	// ActiveActive is required with mode ActiveActive.
+	// +optional
+	ActiveActive *VPNGatewayActiveActive `json:"activeActive,omitempty"`
+	// VirtualMachine is required with mode LiveMigration.
+	// +optional
+	VirtualMachine *VPNGatewayVirtualMachine `json:"virtualMachine,omitempty"`
+}
 
 // Condition types surfaced in VPNGateway status.
 const (
@@ -67,7 +117,47 @@ type VPNGatewayIPsec struct {
 	// their own (strongSwan proposal syntax, e.g. "aes256-sha256-modp2048").
 	// Empty lets charon negotiate its defaults.
 	// +optional
+	// +listType=atomic
 	Proposals []string `json:"proposals,omitempty"`
+
+	// CredentialSecretRef names a cert-manager-compatible TLS Secret containing
+	// tls.crt and tls.key. ca.crt in the same Secret is accepted as the trust
+	// anchor when TrustedCASecretRef is empty.
+	// +optional
+	CredentialSecretRef string `json:"credentialSecretRef,omitempty"`
+
+	// TrustedCASecretRef names a Secret containing ca.crt used to authenticate
+	// certificate-based remote peers.
+	// +optional
+	TrustedCASecretRef string `json:"trustedCASecretRef,omitempty"`
+
+	// LocalIdentity is the IKE identity presented by the gateway. Empty lets
+	// strongSwan derive it from the selected certificate.
+	// +optional
+	LocalIdentity string `json:"localIdentity,omitempty"`
+
+	// AddressPools are non-overlapping virtual-IP pools available to roadwarrior
+	// connections. A connection selects one by name.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	AddressPools []VPNIPsecAddressPool `json:"addressPools,omitempty"`
+}
+
+// VPNIPsecAddressPool is a strongSwan-managed virtual-IP pool. Leases are
+// identity-bound by strongSwan and disappear when the corresponding
+// VPNConnection credential is revoked.
+type VPNIPsecAddressPool struct {
+	// Name is unique within the gateway.
+	Name string `json:"name"`
+
+	// CIDR is the address range allocated to clients and routed to the appliance.
+	CIDR string `json:"cidr"`
+
+	// DNS lists optional DNS servers pushed to clients.
+	// +optional
+	// +listType=atomic
+	DNS []string `json:"dns,omitempty"`
 }
 
 // VPNExternalAddress selects the tunnel endpoint's external (public) address —
@@ -84,6 +174,12 @@ type VPNExternalAddress struct {
 	// pins the endpoint address (docs/vpn.md §3.2). Empty means dynamic.
 	// +optional
 	AddressClaimName string `json:"addressClaimName,omitempty"`
+
+	// AddressClaimNames reserves one stable endpoint per active-active appliance.
+	// It must contain exactly two distinct names in ActiveActive mode.
+	// +optional
+	// +listType=atomic
+	AddressClaimNames []string `json:"addressClaimNames,omitempty"`
 }
 
 // VPNGatewaySpec declares a managed tunnel endpoint for a VPC (issue #6).
@@ -113,6 +209,11 @@ type VPNGatewaySpec struct {
 	// (dual-tunnel + BGP) is a later increment.
 	// +optional
 	HighAvailability bool `json:"highAvailability,omitempty"`
+
+	// HA selects an explicit availability tier. When absent,
+	// highAvailability=true retains the legacy WarmStandby behavior.
+	// +optional
+	HA *VPNGatewayHA `json:"ha,omitempty"`
 }
 
 // VPNGatewayStatus is the observed state of a VPNGateway.
@@ -122,21 +223,40 @@ type VPNGatewayStatus struct {
 	// +optional
 	Address string `json:"address,omitempty"`
 
+	// Addresses are all active public endpoints. Address remains the first entry
+	// for compatibility with single-endpoint clients.
+	// +optional
+	// +listType=atomic
+	Addresses []string `json:"addresses,omitempty"`
+
 	// PublicKey is the WireGuard public key of this gateway's endpoint, which the
 	// tenant configures the remote peer with. The private key stays in a Secret
 	// the appliance mounts; only the public half is surfaced.
 	// +optional
 	PublicKey string `json:"publicKey,omitempty"`
 
+	// PublicKeys are the WireGuard identities of all active-active endpoints.
+	// PublicKey remains the first entry for compatibility.
+	// +optional
+	// +listType=atomic
+	PublicKeys []string `json:"publicKeys,omitempty"`
+
 	// AppliancePort is the cluster-scoped Port name of the tunnel appliance's
 	// leg in the VPC — the next-hop the connections' routes resolve to.
 	// +optional
 	AppliancePort string `json:"appliancePort,omitempty"`
 
+	// AppliancePorts are all ready route next-hops. AppliancePort remains the
+	// first entry for compatibility.
+	// +optional
+	// +listType=atomic
+	AppliancePorts []string `json:"appliancePorts,omitempty"`
+
 	// Routes reports the connections' remote CIDRs and the Port they are
 	// programmed toward, merged into the VPC route table by the agent (the same
 	// shape VPCGateway.status.routes uses).
 	// +optional
+	// +listType=atomic
 	Routes []VPCGatewayRouteStatus `json:"routes,omitempty"`
 
 	// Phase is the lifecycle phase.
@@ -145,6 +265,8 @@ type VPNGatewayStatus struct {
 
 	// Conditions is the detailed state.
 	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
