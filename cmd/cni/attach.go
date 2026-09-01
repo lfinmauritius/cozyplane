@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -38,9 +39,8 @@ import (
 // (names that stay distinct across concurrent sandboxes) for a hypothetical one.
 const maxAttachments = 10
 
-// maxDelegates bounds Multus-delegated NICs by that same one character, which for
-// them holds a letter: net0..net25. KubeVirt numbers a VM's secondary NICs from
-// net1 in spec.networks order, so this is 25 secondary NICs on one VM.
+// maxDelegates bounds legacy netN Multus interface names by the one character
+// available in their backwards-compatible host-veth name: net0..net25.
 const maxDelegates = 25
 
 // hostVethPrefix is the host-side veth prefix. It must stay in step with
@@ -201,27 +201,39 @@ func parseAttachments(vpcAnno, networksAnno, podNS string) ([]attachment, error)
 }
 
 // isDelegatedIfName reports whether an interface name belongs to Multus rather
-// than to the annotation path. net[0-9]+ is what Multus assigns and what KubeVirt
-// requests, in spec.networks order, for a VM's secondary NICs; the name space is
-// reserved so the two paths cannot claim the same interface
-// (docs/kubevirt-multi-nic.md).
+// than to the annotation path. Multus traditionally assigns netN. Recent
+// KubeVirt releases request pod plus an eleven-character lowercase hex digest
+// for secondary launcher-pod interfaces. Both spaces are reserved so the two
+// attachment paths cannot claim the same interface.
 func isDelegatedIfName(name string) bool {
-	if !strings.HasPrefix(name, "net") || len(name) == len("net") {
+	if strings.HasPrefix(name, "net") && len(name) > len("net") {
+		for _, c := range name[len("net"):] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	if !strings.HasPrefix(name, "pod") || len(name) != len("pod")+11 {
 		return false
 	}
-	for _, c := range name[len("net"):] {
-		if c < '0' || c > '9' {
+	for _, c := range name[len("pod"):] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
 			return false
 		}
 	}
 	return true
 }
 
-// delegateIndex extracts N from netN.
+// delegateIndex extracts N from netN. KubeVirt's digest-shaped name has no
+// ordinal; Index is not used for delegated datapath identity, so zero is the
+// canonical value for that form.
 func delegateIndex(ifName string) (int, error) {
-	if !isDelegatedIfName(ifName) {
-		return 0, fmt.Errorf("delegated interface name %q is not net<N>: cozyplane's delegate mode "+
-			"needs the naming Multus and KubeVirt assign by default", ifName)
+	if strings.HasPrefix(ifName, "pod") && isDelegatedIfName(ifName) {
+		return 0, nil
+	}
+	if !strings.HasPrefix(ifName, "net") || !isDelegatedIfName(ifName) {
+		return 0, fmt.Errorf("delegated interface name %q is neither net<N> nor KubeVirt's pod<digest> form", ifName)
 	}
 	n, err := strconv.Atoi(ifName[len("net"):])
 	if err != nil {
@@ -317,6 +329,14 @@ func defaultIfName(index int) string {
 // Same 14 characters as the indexed form and the same "cph" prefix, so datapath's
 // rebuild scan and the masquerade RETURN rule keep matching.
 func hostVethNameForDelegate(containerID, ifName string) (string, error) {
+	if strings.HasPrefix(ifName, "pod") && isDelegatedIfName(ifName) {
+		// KubeVirt names do not carry a NIC ordinal. Hash the complete sandbox and
+		// interface identities so two NICs in one launcher pod stay distinct and
+		// DEL reconstructs the exact same name. Six bytes plus the three-byte
+		// prefix fit Linux IFNAMSIZ exactly.
+		sum := sha256.Sum256([]byte(containerID + "\x00" + ifName))
+		return fmt.Sprintf("%s%x", hostVethPrefix, sum[:6]), nil
+	}
 	n, err := delegateIndex(ifName)
 	if err != nil {
 		return "", err

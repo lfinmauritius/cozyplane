@@ -29,11 +29,16 @@ func TestIsDelegatedIfName(t *testing.T) {
 		{"net1", true},
 		{"net0", true},
 		{"net12", true},
+		{"pod4ef2736ef84", true},
 		{"net", false},  // the bare prefix is not a NIC
 		{"eth0", false}, // the annotation path's own names
 		{"eth1", false},
 		{"netx", false}, // Multus numbers; a name is not a number
 		{"net1x", false},
+		{"pod4ef2736ef8", false},  // digest is too short
+		{"pod4ef2736ef84a", false}, // digest is too long
+		{"pod4EF2736ef84", false},  // KubeVirt emits lowercase hex
+		{"pod4ef2736ef8x", false},  // non-hex digest
 		{"", false},
 	} {
 		if got := isDelegatedIfName(tc.name); got != tc.want {
@@ -56,7 +61,7 @@ func TestHostVethNameSpacesAreDisjoint(t *testing.T) {
 		}
 		seen[n] = "index " + string(rune('0'+i))
 	}
-	for _, ifName := range []string{"net0", "net1", "net2", "net9", "net10", "net25"} {
+	for _, ifName := range []string{"net0", "net1", "net2", "net9", "net10", "net25", "pod4ef2736ef84", "poda4e193d72c1"} {
 		n, err := hostVethNameForDelegate(id, ifName)
 		if err != nil {
 			t.Fatalf("hostVethNameForDelegate(%q): %v", ifName, err)
@@ -79,7 +84,7 @@ func TestHostVethNameSpacesAreDisjoint(t *testing.T) {
 
 func TestHostVethNameForDelegateRefusals(t *testing.T) {
 	const id = "abcdef0123456789"
-	for _, ifName := range []string{"eth0", "net", "myiface", "net26"} {
+	for _, ifName := range []string{"eth0", "net", "myiface", "net26", "pod4ef2736ef8x"} {
 		if _, err := hostVethNameForDelegate(id, ifName); err == nil {
 			t.Errorf("hostVethNameForDelegate(%q) succeeded; want an error", ifName)
 		}
@@ -194,6 +199,16 @@ func TestDelegateAttachmentWithoutAnnotationUsesIPAM(t *testing.T) {
 	}
 	if a.VPCNamespace != "team-a" || a.VPCName != "back" {
 		t.Errorf("vpc = %s/%s, want team-a/back", a.VPCNamespace, a.VPCName)
+	}
+}
+
+func TestDelegateAttachmentAcceptsKubeVirtInterfaceName(t *testing.T) {
+	a, err := delegateAttachment("team-a/back", "pod4ef2736ef84", "", "team-a")
+	if err != nil {
+		t.Fatalf("delegateAttachment: %v", err)
+	}
+	if a.IfName != "pod4ef2736ef84" || !a.Delegated {
+		t.Errorf("unexpected attachment: ifname=%q delegated=%v", a.IfName, a.Delegated)
 	}
 }
 
