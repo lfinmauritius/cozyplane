@@ -19,6 +19,7 @@ package sdn
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -311,5 +312,53 @@ func TestFloatingIPEndpointSliceTracksLiveness(t *testing.T) {
 	}
 	if r := eps2.Endpoints[0].Conditions.Ready; r != nil && *r {
 		t.Error("endpoint must be not-Ready without a live target (address held but dark)")
+	}
+}
+
+// status must be seeded from the object's existing conditions, not built fresh,
+// or meta.SetStatusCondition treats every condition as new on every write that
+// does change something — silently re-stamping LastTransitionTime on conditions
+// that did not themselves transition.
+func TestFloatingIPUnrelatedConditionKeepsTransitionTimeOnPartialChange(t *testing.T) {
+	c := fipClient(t,
+		livePort("team-a", "vpc-a", "10.0.0.5", "node-1"),
+		floatingIP("team-a", "web", "vpc-a", "10.0.0.5"),
+	)
+	reconcileFIP(t, c, "team-a", "web") // creates the Service; settles ServiceReady
+
+	got := &sdnv1alpha1.FloatingIP{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "team-a", Name: "web"}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	past := metav1.NewTime(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+	sr := meta.FindStatusCondition(got.Status.Conditions, sdnv1alpha1.FloatingIPConditionServiceReady)
+	if sr == nil {
+		t.Fatal("ServiceReady condition missing after first reconcile")
+	}
+	sr.LastTransitionTime = past
+	if err := c.Status().Update(context.Background(), got); err != nil {
+		t.Fatalf("backdate ServiceReady: %v", err)
+	}
+
+	// The LB implementation assigning an address flips AddressAssigned on the
+	// next reconcile — ServiceReady is untouched by this.
+	assignServiceAddress(t, c, ownedFloatingService(t, c, "team-a", "web"), "203.0.113.7")
+	second := reconcileFIP(t, c, "team-a", "web")
+
+	addressAssigned := meta.FindStatusCondition(second.Status.Conditions, sdnv1alpha1.FloatingIPConditionAddressAssigned)
+	if addressAssigned == nil || addressAssigned.Status != metav1.ConditionTrue {
+		t.Fatal("AddressAssigned should have transitioned to True")
+	}
+	if addressAssigned.LastTransitionTime.Equal(&past) {
+		t.Fatal("test is broken: AddressAssigned should be the condition that transitions, not the backdated one")
+	}
+
+	serviceReady := meta.FindStatusCondition(second.Status.Conditions, sdnv1alpha1.FloatingIPConditionServiceReady)
+	if serviceReady == nil {
+		t.Fatal("ServiceReady condition missing after second reconcile")
+	}
+	if !serviceReady.LastTransitionTime.Equal(&past) {
+		t.Errorf("ServiceReady LastTransitionTime = %v, want unchanged %v — a sibling condition's transition must not touch it",
+			serviceReady.LastTransitionTime, past)
 	}
 }

@@ -5,6 +5,15 @@ kube-proxy replacement — no Cilium, no kube-proxy**. It follows the stock
 Cozystack install flow and only changes two things: the **platform source**
 (point it at the cozyplane fork) and the **networking variant** (`cozyplane`).
 
+> **Two ways to get the charts in.** This runbook covers the **fork platform
+> source**: the charts are vendored into a `cozystack/cozystack` fork branch and
+> pushed as an OCI artifact, replacing the whole platform source. The lighter
+> alternative — and the one to prefer for a stand that only wants cozyplane —
+> is to apply the two `PackageSource` manifests this repository ships in
+> `packages/packagesources/`, which serve `chart/` straight out of git on top of
+> a stock platform source. See [packaging.md](packaging.md); the ordering,
+> namespace and values-file rationale below applies to both.
+
 The stock tutorial is the source of truth for the surrounding steps; this runbook
 assumes you have it open:
 

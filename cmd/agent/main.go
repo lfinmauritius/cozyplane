@@ -480,9 +480,10 @@ func advertiseNodeAddrs(ctx context.Context, client kubernetes.Interface, nodeNa
 // the overlay the true source survives and the destination node gates it.
 func nodeAddresses(node *corev1.Node) []net.IP { return npNodeAddresses(node) }
 
-// watchNodes starts a Node informer that mirrors every other node's pod CIDR
-// into the remotes map, and every other node's addresses into node_remotes. It
-// blocks until the cache is synced.
+// watchNodes starts a Node informer that indexes every other node's tunnel
+// endpoint and mirrors their addresses into node_remotes. It blocks until the
+// cache is synced. (Pod delivery is keyed per address by watchFabricIPs; nothing
+// here reads `spec.podCIDR` any more — see docs/api-groups.md.)
 func watchNodes(ctx context.Context, client kubernetes.Interface, mgr *datapath.Manager, selfName string,
 	nodeIPs *nodeIPIndex, nodePools *nodePoolIndex, fabricResync func(), log *slog.Logger) error {
 	factory := informers.NewSharedInformerFactory(client, 0)
@@ -508,8 +509,14 @@ func watchNodes(ctx context.Context, client kubernetes.Interface, mgr *datapath.
 	}
 
 	apply := func(obj any) {
+		// No PodCIDR condition here, deliberately. The pool is FLAT
+		// (docs/api-groups.md): `spec.podCIDR` is not read any more, so gating
+		// on it only meant that a cluster without the node-ipam controller got
+		// an EMPTY nodeIPs index and an EMPTY node_remotes map — no delivery
+		// entry for any pod, and every cross-node flow black-holed. kind always
+		// assigns podCIDRs, so no e2e could see it.
 		node, ok := obj.(*corev1.Node)
-		if !ok || node.Name == selfName || node.Spec.PodCIDR == "" {
+		if !ok || node.Name == selfName {
 			return
 		}
 		ip := internalIP(node)
@@ -538,7 +545,7 @@ func watchNodes(ctx context.Context, client kubernetes.Interface, mgr *datapath.
 		UpdateFunc: func(_, newObj any) { apply(newObj) },
 		DeleteFunc: func(obj any) {
 			node, ok := obj.(*corev1.Node)
-			if !ok || node.Name == selfName || node.Spec.PodCIDR == "" {
+			if !ok || node.Name == selfName {
 				return
 			}
 			for _, addr := range nodeAddresses(node) {
@@ -1610,18 +1617,6 @@ func internalIPv6(node *corev1.Node) string {
 	return ""
 }
 
-// nodePodCIDRs returns a node's pod CIDRs across all families: Spec.PodCIDRs on a
-// dual-stack node (a v4 and a v6), falling back to the single Spec.PodCIDR.
-func nodePodCIDRs(node *corev1.Node) []string {
-	if len(node.Spec.PodCIDRs) > 0 {
-		return node.Spec.PodCIDRs
-	}
-	if node.Spec.PodCIDR != "" {
-		return []string{node.Spec.PodCIDR}
-	}
-	return nil
-}
-
 // watchServiceVIPs projects every ServiceVIP into the svc_vips datapath map
 // (docs/services-in-vpc.md increment 2). Full-state resync on any ServiceVIP
 // or VPC change — the objects are few and the map diff is cheap.
@@ -2138,7 +2133,11 @@ func serveMetrics(ctx context.Context, mgr *datapath.Manager, vpcs sdnv1alpha1in
 		_, _ = w.Write([]byte(b.String()))
 	})
 
-	srv := &http.Server{Addr: ":9411", Handler: mux}
+	// ReadHeaderTimeout: without it a client that opens a connection and never
+	// finishes its request headers holds a goroutine forever, and this listener
+	// is on the node's own address (hostNetwork) where anything reachable can
+	// open one.
+	srv := &http.Server{Addr: ":9411", Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
