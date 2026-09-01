@@ -19,6 +19,7 @@ package sdn
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -338,5 +339,54 @@ func TestGatewayStatusConvergesAcrossReconciles(t *testing.T) {
 	if first.ResourceVersion != second.ResourceVersion {
 		t.Errorf("status rewritten on a no-op reconcile: %s -> %s",
 			first.ResourceVersion, second.ResourceVersion)
+	}
+}
+
+// status must be seeded from the object's existing conditions, not built fresh,
+// or meta.SetStatusCondition treats every condition as new on every write that
+// does change something — silently re-stamping LastTransitionTime on conditions
+// that did not themselves transition.
+func TestGatewayUnrelatedConditionKeepsTransitionTimeOnPartialChange(t *testing.T) {
+	c := gwClient(t,
+		vpcWithCIDRs("team-a", "vpc-a", 100, "10.10.0.0/24"),
+		natGateway("team-a", "door", "vpc-a"))
+	reconcileGateway(t, c, "team-a", "door")
+
+	got := &sdnv1alpha1.VPCGateway{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "team-a", Name: "door"}, got); err != nil {
+		t.Fatalf("get gateway: %v", err)
+	}
+	past := metav1.NewTime(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+	vr := meta.FindStatusCondition(got.Status.Conditions, sdnv1alpha1.VPCGatewayConditionVPCResolved)
+	if vr == nil {
+		t.Fatal("VPCResolved condition missing after first reconcile")
+	}
+	vr.LastTransitionTime = past
+	if err := c.Status().Update(context.Background(), got); err != nil {
+		t.Fatalf("backdate VPCResolved: %v", err)
+	}
+
+	// An earlier-named gateway on the same VPC flips "door" from exclusive to
+	// conflicted on the next reconcile — VPCResolved is untouched by this.
+	if err := c.Create(context.Background(), natGateway("team-a", "aaa", "vpc-a")); err != nil {
+		t.Fatalf("create conflicting gateway: %v", err)
+	}
+	second := reconcileGateway(t, c, "team-a", "door")
+
+	exclusive := meta.FindStatusCondition(second.Status.Conditions, sdnv1alpha1.VPCGatewayConditionExclusive)
+	if exclusive == nil || exclusive.Status != metav1.ConditionFalse {
+		t.Fatal("Exclusive should have transitioned to False")
+	}
+	if exclusive.LastTransitionTime.Equal(&past) {
+		t.Fatal("test is broken: Exclusive should be the condition that transitions, not the backdated one")
+	}
+
+	vpcResolved := meta.FindStatusCondition(second.Status.Conditions, sdnv1alpha1.VPCGatewayConditionVPCResolved)
+	if vpcResolved == nil {
+		t.Fatal("VPCResolved condition missing after second reconcile")
+	}
+	if !vpcResolved.LastTransitionTime.Equal(&past) {
+		t.Errorf("VPCResolved LastTransitionTime = %v, want unchanged %v — a sibling condition's transition must not touch it",
+			vpcResolved.LastTransitionTime, past)
 	}
 }

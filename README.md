@@ -120,6 +120,7 @@ Start with [design.md](docs/design.md) (the vision and the **design tenets**), t
 | [docs/floating-ha.md](docs/floating-ha.md) | Floating IPs: separating attraction from delivery |
 | [docs/vm-provisioning.md](docs/vm-provisioning.md) | *Design draft* — metadata endpoint & guest autoconfiguration |
 | [docs/cross-family.md](docs/cross-family.md) | *Design draft* — cross-family (v4↔v6) peering & north-south |
+| [docs/packaging.md](docs/packaging.md) | The four Helm charts, the in-repo `PackageSource` manifests, where the images are built, and the digest-pin discipline |
 
 Contributor invariants (never reach for iptables in the datapath, 128-bit/NAT64
 address form, etc.) live in [CLAUDE.md](CLAUDE.md).
@@ -141,7 +142,8 @@ pkg/registry/   REST storage for the apiserver
 pkg/generated/  generated clientset/informers/listers/openapi
 config/crd/     generated CRDs (the prototype serving path, alongside the aggregated server)
 deploy/         DaemonSet, controller Deployment, RBAC
-chart/cozyplane/  Helm chart (Cozystack packaging)
+chart/          four Helm charts: cozyplane, -kpr, -apiserver, -cilium-crds (docs/packaging.md)
+packages/packagesources/  Cozystack PackageSource manifests that serve chart/ straight from git
 test/           kind cluster config + e2e suite
 ```
 

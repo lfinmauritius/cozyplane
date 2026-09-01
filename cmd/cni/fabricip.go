@@ -105,7 +105,7 @@ func claimFabricIPs(ctx context.Context, client localclientset.Interface, cidrs 
 			// pod is worse than a failed ADD, and the addresses would leak
 			// until the controller's GC noticed.
 			cctx, ccancel := cleanupContext(ctx)
-			releaseFabricIPs(cctx, client, podUID)
+			_ = releaseFabricIPs(cctx, client, podUID)
 			ccancel()
 			return nil, err
 		}
@@ -210,15 +210,26 @@ func addOffset(base net.IP, n uint64) net.IP {
 	return out
 }
 
-// releaseFabricIPs drops every address held by this pod UID. Best-effort by
-// design: if it fails (or never runs, because the node died), the controller's
-// GC reaps the object once the pod is gone — which is the entire point of the
-// address being an object rather than a line in a file.
-func releaseFabricIPs(ctx context.Context, client localclientset.Interface, podUID string) {
+// releaseFabricIPs drops every address held by this pod UID.
+//
+// One DeleteCollection, not a list-then-delete walk: this runs on the rollback
+// path of a failed ADD, under the plugin's shortest timeout budget and usually
+// while the API server is the unhealthy thing, so it should cost one round trip.
+// The SA is granted `deletecollection` for it (chart/cozyplane/templates/agent.yaml),
+// a verb that reaches nothing the `list` and `delete` it already holds could not.
+//
+// Best-effort in that it may never run at all (the node dies mid-ADD) — the
+// controller's GC reaps the claim once the pod is gone. But a claim leaked while
+// its pod still LIVES is invisible to that GC forever, so the error is returned
+// rather than dropped; see bringup-field-notes.md §9 for how that bit.
+func releaseFabricIPs(ctx context.Context, client localclientset.Interface, podUID string) error {
 	if podUID == "" {
-		return
+		return nil
 	}
-	_ = client.LocalV1alpha1().FabricIPs().DeleteCollection(ctx,
+	if err := client.LocalV1alpha1().FabricIPs().DeleteCollection(ctx,
 		metav1.DeleteOptions{},
-		metav1.ListOptions{LabelSelector: labelFabricPodUID + "=" + podUID})
+		metav1.ListOptions{LabelSelector: labelFabricPodUID + "=" + podUID}); err != nil {
+		return fmt.Errorf("release fabric IP claims: %w", err)
+	}
+	return nil
 }
