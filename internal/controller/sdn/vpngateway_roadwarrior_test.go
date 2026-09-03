@@ -44,7 +44,7 @@ func TestRoadwarriorPoolBecomesRouteAndVICIConfig(t *testing.T) {
 	if len(conns[0].Spec.RemoteCIDRs) != 1 || conns[0].Spec.RemoteCIDRs[0] != "10.250.0.0/24" {
 		t.Fatalf("pool was not materialized as a route: %v", conns[0].Spec.RemoteCIDRs)
 	}
-	raw, err := r.buildIPsecConfig(context.Background(), gw, &sdnv1alpha1.VPC{}, conns, 1280)
+	raw, err := r.buildIPsecConfig(context.Background(), gw, []*sdnv1alpha1.VPC{{}}, conns, 1280)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestActiveActiveWireGuardConfigUsesPairedPeers(t *testing.T) {
 			PeerEndpoints:  []string{"192.0.2.10:51820", "192.0.2.11:51820"},
 		},
 	}}
-	raw, err := r.buildWGConfig(context.Background(), gw, &sdnv1alpha1.VPC{}, []string{"private-0", "private-1"}, []sdnv1alpha1.VPNConnection{conn}, 1320)
+	raw, err := r.buildWGConfig(context.Background(), gw, []*sdnv1alpha1.VPC{{}}, []string{"private-0", "private-1"}, []sdnv1alpha1.VPNConnection{conn}, 1320)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -234,12 +234,15 @@ type VPNExternalAddress struct {
 
 // VPNGatewaySpec declares a managed tunnel endpoint for a VPC (issue #6).
 type VPNGatewaySpec struct {
-	VPCRef           LocalVPCRef
-	WireGuard        *VPNGatewayWireGuard
-	IPsec            *VPNGatewayIPsec
-	ExternalAddress  VPNExternalAddress
-	HighAvailability bool
-	HA               *VPNGatewayHA
+	VPCRef LocalVPCRef
+	// AdditionalVPCRefs are further VPCs this gateway serves (hub, docs/vpn.md
+	// §3.3). Same namespace as the gateway; forbidden with ha.mode=LiveMigration.
+	AdditionalVPCRefs []LocalVPCRef
+	WireGuard         *VPNGatewayWireGuard
+	IPsec             *VPNGatewayIPsec
+	ExternalAddress   VPNExternalAddress
+	HighAvailability  bool
+	HA                *VPNGatewayHA
 }
 
 // VPNGatewayStatus is the observed state of a VPNGateway.

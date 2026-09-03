@@ -3378,9 +3378,31 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNGatewaySpec(ref common.ReferenceCallba
 				Properties: map[string]spec.Schema{
 					"vpcRef": {
 						SchemaProps: spec.SchemaProps{
-							Description: "VPCRef is the VPC this gateway terminates tunnels into, in this namespace.",
+							Description: "VPCRef is the VPC this gateway terminates tunnels into, in this namespace. It is the PRIMARY served VPC: the appliance's default route, its endpoint FloatingIP and the tunnel MTU budget all belong to it.",
 							Default:     map[string]interface{}{},
 							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef"),
+						},
+					},
+					"additionalVPCRefs": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "AdditionalVPCRefs are further VPCs this gateway serves (hub, docs/vpn.md §3.3): every connection's remoteCIDRs are routed into each of them, and each of them reaches every connection's remote sites. Same namespace as the gateway. Served VPCs' CIDRs must be pairwise disjoint. Forbidden with ha.mode=LiveMigration.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef"),
+									},
+								},
+							},
 						},
 					},
 					"wireguard": {

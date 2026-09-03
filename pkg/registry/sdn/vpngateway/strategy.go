@@ -112,6 +112,34 @@ func validateVPNGateway(gw *sdn.VPNGateway) field.ErrorList {
 	if gw.Spec.VPCRef.Name == "" {
 		errs = append(errs, field.Required(specPath.Child("vpcRef", "name"), "VPC name is required"))
 	}
+	// AdditionalVPCRefs turn the gateway into a hub serving several same-namespace
+	// VPCs (docs/vpn.md §3.3). The CNI caps attachments at 10 legs total, so at
+	// most 9 additional VPCs are allowed alongside spec.vpcRef; entries must be
+	// unique and distinct from spec.vpcRef.name, and the feature is incompatible
+	// with the LiveMigration KubeVirt appliance, which only has one VPC leg.
+	additionalPath := specPath.Child("additionalVPCRefs")
+	if len(gw.Spec.AdditionalVPCRefs) > 9 {
+		errs = append(errs, field.TooMany(additionalPath, len(gw.Spec.AdditionalVPCRefs), 9))
+	}
+	additionalNames := map[string]bool{}
+	for i, ref := range gw.Spec.AdditionalVPCRefs {
+		p := additionalPath.Index(i)
+		if ref.Name == "" {
+			errs = append(errs, field.Required(p.Child("name"), "VPC name is required"))
+			continue
+		}
+		if ref.Name == gw.Spec.VPCRef.Name {
+			errs = append(errs, field.Invalid(p.Child("name"), ref.Name, "must differ from spec.vpcRef.name"))
+		}
+		if additionalNames[ref.Name] {
+			errs = append(errs, field.Duplicate(p.Child("name"), ref.Name))
+		}
+		additionalNames[ref.Name] = true
+	}
+	if gw.Spec.HA != nil && gw.Spec.HA.Mode == sdn.VPNGatewayHAModeLiveMigration && len(gw.Spec.AdditionalVPCRefs) > 0 {
+		errs = append(errs, field.Forbidden(additionalPath,
+			"not supported with ha.mode=LiveMigration: the KubeVirt appliance has a single VPC leg"))
+	}
 	backends := 0
 	if gw.Spec.WireGuard != nil {
 		backends++

@@ -250,18 +250,24 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	vpc := &sdnv1alpha1.VPC{}
-	vpcOK := false
-	if name := gw.Spec.VPCRef.Name; name != "" {
-		err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: name}, vpc)
-		vpcOK = err == nil
-		if err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("fetch VPC: %w", err)
-		}
+	// The served VPCs: the primary (spec.vpcRef) first, then the hub's additional
+	// VPCs (docs/vpn.md §3.3). Every one must resolve — the routes and the
+	// disjointness constraint below are computed over the whole set.
+	servedVPCs, missing, err := r.servedVPCs(ctx, gw)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("fetch VPC: %w", err)
 	}
-	if !vpcOK {
+	if missing != "" {
 		return r.reportUnready(ctx, gw, "VPCUnresolved",
-			fmt.Sprintf("spec.vpcRef %q names no VPC in this namespace", gw.Spec.VPCRef.Name))
+			fmt.Sprintf("%s names no VPC in this namespace", missing))
+	}
+	vpc := servedVPCs[0]
+	// Hub constraint (docs/vpn.md §3.3): routed traffic is delivered natively, so
+	// one appliance cannot serve two owners of one prefix. Overlapping served
+	// VPCs hold the gateway Pending rather than routing ambiguously.
+	servedCIDRs, overlap := servedVPCCIDRs(servedVPCs)
+	if overlap != "" {
+		return r.reportUnready(ctx, gw, "VPCCIDRsOverlap", overlap)
 	}
 
 	// The connections this gateway terminates, and the remote prefixes they reach.
@@ -276,7 +282,7 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Route-CIDR deny-set: strip cluster-internal / reserved remote CIDRs before
 	// anything consumes them, so a tenant cannot redirect the VPC's own internal
 	// traffic into a tunnel. The rejected prefixes surface in a condition.
-	rejectedCIDRs := r.filterForbiddenCIDRs(conns)
+	rejectedCIDRs := r.filterForbiddenCIDRs(conns, servedCIDRs)
 	fwdCIDRs := unionRemoteCIDRs(conns)
 
 	// Per-tenant quota (increment 6): reject a gateway beyond the namespace cap or
@@ -313,7 +319,7 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// The peer set the appliance mounts. It carries secrets (WG private key / PSKs),
 	// so it is a Secret; its checksum rolls the appliance when peers change.
-	cfgJSON, err := r.buildConfig(ctx, gw, vpc, backend, privateKeys, conns)
+	cfgJSON, err := r.buildConfig(ctx, gw, servedVPCs, backend, privateKeys, conns)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -324,8 +330,9 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// The scoped forwarding grant (increment 2): the appliance may source the
 	// remote CIDRs and nothing else. An empty union means no Ready connection yet
-	// — the binding still exists (attach authorization) but grants no forwarding.
-	if err := r.ensureBinding(ctx, gw, fwdCIDRs); err != nil {
+	// — the bindings still exist (attach authorization) but grant no forwarding.
+	// One binding per served VPC (docs/vpn.md §3.3).
+	if err := r.ensureBindings(ctx, gw, servedVPCs, fwdCIDRs); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -378,19 +385,22 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// The routes the agent programs into vpc_routes: each connection's remote
-	// CIDRs toward the appliance Port. Empty until the Port resolves.
+	// CIDRs toward the appliance's leg in each served VPC (docs/vpn.md §3.3).
+	// The agent scopes a route by the VNI of its next-hop Port, so one entry per
+	// (connection × VPC) — never a mix of legs from two VPCs in one entry. Every
+	// VPC's routes point at the leg(s) of the SAME appliance(s) selected in the
+	// primary VPC: that is where the tunnel lives. Empty until the Ports resolve.
 	var routes []sdnv1alpha1.VPCGatewayRouteStatus
 	if len(appliancePorts) == wantAppliances {
-		for i := range conns {
-			c := &conns[i]
-			if len(c.Spec.RemoteCIDRs) == 0 {
-				continue
+		for vi, served := range servedVPCs {
+			vpcPorts := appliancePorts
+			if vi > 0 {
+				vpcPorts = r.resolveVPCLegPorts(ctx, gw, served, appliances)
+				if len(vpcPorts) != wantAppliances {
+					continue // leg(s) not minted yet; the Port watch re-enqueues
+				}
 			}
-			routes = append(routes, sdnv1alpha1.VPCGatewayRouteStatus{
-				CIDRs: append([]string(nil), c.Spec.RemoteCIDRs...),
-				Port:  appliancePort,
-				Ports: append([]string(nil), appliancePorts...),
-			})
+			routes = append(routes, connectionRoutes(conns, vpcPorts)...)
 		}
 	}
 
@@ -410,7 +420,8 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		"ApplianceReady", applianceReadyMessage(appliancePort))
 	setVPNGWCondition(&status, sdnv1alpha1.VPNGatewayConditionAddressAssigned, address != "",
 		"AddressAssigned", addressMessage(address))
-	routesReady := len(appliancePorts) == wantAppliances && len(routes) == len(nonEmptyRouteConns(conns))
+	routesReady := len(appliancePorts) == wantAppliances &&
+		len(routes) == len(nonEmptyRouteConns(conns))*len(servedVPCs)
 	setVPNGWCondition(&status, sdnv1alpha1.VPNGatewayConditionRoutesProgrammed, routesReady,
 		"RoutesProgrammed", routesMessage(routesReady, len(routes)))
 	setVPNGWCondition(&status, sdnv1alpha1.VPNGatewayConditionRemoteCIDRsAccepted, len(rejectedCIDRs) == 0,
@@ -467,7 +478,6 @@ func (r *VPNGatewayReconciler) teardownOwned(ctx context.Context, gw *sdnv1alpha
 		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gw.Namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + "-headless", Namespace: gw.Namespace}},
 		vpnVirtualMachineObject(gw.Namespace, name),
-		&sdnv1alpha1.VPCBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gw.Namespace}},
 		&sdnv1alpha1.FloatingIP{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gw.Namespace}},
 		&sdnv1alpha1.FloatingIP{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: gw.Namespace}},
 		&sdnv1alpha1.FloatingIP{ObjectMeta: metav1.ObjectMeta{Name: name + "-1", Namespace: gw.Namespace}},
@@ -477,7 +487,9 @@ func (r *VPNGatewayReconciler) teardownOwned(ctx context.Context, gw *sdnv1alpha
 			return fmt.Errorf("teardown %T %q: %w", o, name, err)
 		}
 	}
-	return nil
+	// The forwarding-grant bindings: one per served VPC, found by label rather
+	// than by name (docs/vpn.md §3.3).
+	return r.pruneVPCBindings(ctx, gw, nil)
 }
 
 // reportUnready writes a Pending status carrying a single blocking reason when
@@ -556,12 +568,12 @@ func (r *VPNGatewayReconciler) overQuota(ctx context.Context, gw *sdnv1alpha1.VP
 // config. It returns the rejected prefixes (with a reason) for the status
 // condition. conns is a local copy — reassigning each RemoteCIDRs to a fresh
 // slice never touches the informer cache.
-func (r *VPNGatewayReconciler) filterForbiddenCIDRs(conns []sdnv1alpha1.VPNConnection) []string {
+func (r *VPNGatewayReconciler) filterForbiddenCIDRs(conns []sdnv1alpha1.VPNConnection, servedCIDRs []*net.IPNet) []string {
 	var rejected []string
 	for i := range conns {
 		allowed := make([]string, 0, len(conns[i].Spec.RemoteCIDRs))
 		for _, c := range conns[i].Spec.RemoteCIDRs {
-			if reason := r.forbiddenRemoteCIDR(c); reason != "" {
+			if reason := r.forbiddenRemoteCIDR(c, servedCIDRs); reason != "" {
 				rejected = append(rejected, fmt.Sprintf("%s (%s)", c, reason))
 				continue
 			}
@@ -573,7 +585,10 @@ func (r *VPNGatewayReconciler) filterForbiddenCIDRs(conns []sdnv1alpha1.VPNConne
 }
 
 // forbiddenRemoteCIDR returns why a remote CIDR is refused, or "" when allowed.
-func (r *VPNGatewayReconciler) forbiddenRemoteCIDR(cidr string) string {
+// servedCIDRs are the served VPCs' own prefixes: a remote CIDR overlapping one
+// would let a remote site claim (and the appliance source) a VPC's own
+// addresses — the hub constraint, docs/vpn.md §3.3.
+func (r *VPNGatewayReconciler) forbiddenRemoteCIDR(cidr string, servedCIDRs []*net.IPNet) string {
 	_, n, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return "not a CIDR"
@@ -586,6 +601,11 @@ func (r *VPNGatewayReconciler) forbiddenRemoteCIDR(cidr string) string {
 	for _, f := range r.Config.InternalCIDRs {
 		if cidrsOverlap(n, f) {
 			return "cluster-internal"
+		}
+	}
+	for _, f := range servedCIDRs {
+		if cidrsOverlap(n, f) {
+			return "served VPC"
 		}
 	}
 	return ""
@@ -613,6 +633,95 @@ func unionRemoteCIDRs(conns []sdnv1alpha1.VPNConnection) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// unionVPCCIDRs collects every served VPC's CIDRs, de-duplicated and sorted —
+// what an active-active hub advertises over BGP.
+func unionVPCCIDRs(vpcs []*sdnv1alpha1.VPC) []string {
+	seen := map[string]bool{}
+	for _, vpc := range vpcs {
+		for _, c := range vpc.Spec.CIDRs {
+			seen[c] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for c := range seen {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// servedVPCs resolves the gateway's primary VPC followed by its additional VPCs
+// (hub, docs/vpn.md §3.3), all in the gateway's namespace. missing names the
+// first reference that resolves to no VPC, as `<field> "<name>"`.
+func (r *VPNGatewayReconciler) servedVPCs(ctx context.Context, gw *sdnv1alpha1.VPNGateway) (vpcs []*sdnv1alpha1.VPC, missing string, err error) {
+	type ref struct{ field, name string }
+	refs := []ref{{"spec.vpcRef", gw.Spec.VPCRef.Name}}
+	for i, a := range gw.Spec.AdditionalVPCRefs {
+		refs = append(refs, ref{fmt.Sprintf("spec.additionalVPCRefs[%d]", i), a.Name})
+	}
+	for _, rf := range refs {
+		if rf.name != "" {
+			vpc := &sdnv1alpha1.VPC{}
+			err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: rf.name}, vpc)
+			if err == nil {
+				vpcs = append(vpcs, vpc)
+				continue
+			}
+			if !apierrors.IsNotFound(err) {
+				return nil, "", err
+			}
+		}
+		return nil, fmt.Sprintf("%s %q", rf.field, rf.name), nil
+	}
+	return vpcs, "", nil
+}
+
+// servedVPCCIDRs parses every served VPC's CIDRs and reports the first pair of
+// VPCs whose prefixes overlap — the hub constraint (docs/vpn.md §3.3) — or ""
+// when the set is disjoint. A single served VPC is trivially disjoint.
+func servedVPCCIDRs(vpcs []*sdnv1alpha1.VPC) (cidrs []*net.IPNet, overlap string) {
+	type owned struct {
+		vpc string
+		net *net.IPNet
+	}
+	var all []owned
+	for _, vpc := range vpcs {
+		for _, c := range vpc.Spec.CIDRs {
+			_, n, err := net.ParseCIDR(c)
+			if err != nil {
+				continue // a malformed VPC CIDR is the VPC's own validation failure
+			}
+			for _, o := range all {
+				if o.vpc != vpc.Name && cidrsOverlap(o.net, n) {
+					return nil, fmt.Sprintf("served VPCs %q (%s) and %q (%s) have overlapping CIDRs",
+						o.vpc, o.net, vpc.Name, n)
+				}
+			}
+			all = append(all, owned{vpc: vpc.Name, net: n})
+			cidrs = append(cidrs, n)
+		}
+	}
+	return cidrs, ""
+}
+
+// connectionRoutes renders one route entry per connection with remote CIDRs,
+// all toward the given leg Port(s) of one served VPC.
+func connectionRoutes(conns []sdnv1alpha1.VPNConnection, vpcPorts []string) []sdnv1alpha1.VPCGatewayRouteStatus {
+	var routes []sdnv1alpha1.VPCGatewayRouteStatus
+	for i := range conns {
+		c := &conns[i]
+		if len(c.Spec.RemoteCIDRs) == 0 {
+			continue
+		}
+		routes = append(routes, sdnv1alpha1.VPCGatewayRouteStatus{
+			CIDRs: append([]string(nil), c.Spec.RemoteCIDRs...),
+			Port:  vpcPorts[0],
+			Ports: append([]string(nil), vpcPorts...),
+		})
+	}
+	return routes
 }
 
 // applyIPsecAddressPools adds a selected roadwarrior pool CIDR to the local
@@ -729,12 +838,15 @@ func (r *VPNGatewayReconciler) ensureKeypairs(ctx context.Context, gw *sdnv1alph
 
 // buildConfig renders the appliance's tunnel config JSON, dispatching on the
 // gateway's backend. Its bytes go into a Secret the appliance mounts.
+// The MTU budget follows the PRIMARY served VPC: its leg carries the default
+// route, hence the encapsulated tunnel traffic.
 func (r *VPNGatewayReconciler) buildConfig(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
-	vpc *sdnv1alpha1.VPC, backend string, privateKeys []string, conns []sdnv1alpha1.VPNConnection) ([]byte, error) {
+	servedVPCs []*sdnv1alpha1.VPC, backend string, privateKeys []string, conns []sdnv1alpha1.VPNConnection) ([]byte, error) {
+	mtu := tunnelMTU(servedVPCs[0].Spec.MTU, backend)
 	if backend == backendIPsec {
-		return r.buildIPsecConfig(ctx, gw, vpc, conns, tunnelMTU(vpc.Spec.MTU, backend))
+		return r.buildIPsecConfig(ctx, gw, servedVPCs, conns, mtu)
 	}
-	return r.buildWGConfig(ctx, gw, vpc, privateKeys, conns, tunnelMTU(vpc.Spec.MTU, backend))
+	return r.buildWGConfig(ctx, gw, servedVPCs, privateKeys, conns, mtu)
 }
 
 // tunnelMTU reserves worst-case outer overhead so the kernel can emit PMTU
@@ -757,7 +869,7 @@ func tunnelMTU(vpcMTU int32, backend string) int {
 // listen port, and one peer per connection (reading each connection's optional
 // preshared-key Secret).
 func (r *VPNGatewayReconciler) buildWGConfig(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
-	vpc *sdnv1alpha1.VPC, privateKeys []string, conns []sdnv1alpha1.VPNConnection, mtu int) ([]byte, error) {
+	servedVPCs []*sdnv1alpha1.VPC, privateKeys []string, conns []sdnv1alpha1.VPNConnection, mtu int) ([]byte, error) {
 	type peer struct {
 		Name         string   `json:"name,omitempty"`
 		PublicKey    string   `json:"publicKey"`
@@ -778,7 +890,7 @@ func (r *VPNGatewayReconciler) buildWGConfig(ctx context.Context, gw *sdnv1alpha
 		PrivateKeys: append([]string(nil), privateKeys...),
 		ListenPort:  int(r.listenPort(gw)),
 		MTU:         mtu,
-		Routing:     routingConfigFor(gw, vpc),
+		Routing:     routingConfigFor(gw, servedVPCs),
 	}
 	if len(privateKeys) > 0 {
 		cfg.PrivateKey = privateKeys[0]
@@ -832,7 +944,7 @@ func (r *VPNGatewayReconciler) buildWGConfig(ctx context.Context, gw *sdnv1alpha
 // derived from the connection name so the route-based tunnel binds to its own
 // interface.
 func (r *VPNGatewayReconciler) buildIPsecConfig(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
-	vpc *sdnv1alpha1.VPC, conns []sdnv1alpha1.VPNConnection, mtu int) ([]byte, error) {
+	servedVPCs []*sdnv1alpha1.VPC, conns []sdnv1alpha1.VPNConnection, mtu int) ([]byte, error) {
 	type credentials struct {
 		Certificate string `json:"certificate"`
 		PrivateKey  string `json:"privateKey"`
@@ -869,7 +981,7 @@ func (r *VPNGatewayReconciler) buildIPsecConfig(ctx context.Context, gw *sdnv1al
 		Pools       []addressPool     `json:"pools,omitempty"`
 		Peers       []peer            `json:"peers"`
 		Routing     *vpnRoutingConfig `json:"routing,omitempty"`
-	}{MTU: mtu, Routing: routingConfigFor(gw, vpc)}
+	}{MTU: mtu, Routing: routingConfigFor(gw, servedVPCs)}
 	if gw.Spec.IPsec != nil {
 		for _, pool := range gw.Spec.IPsec.AddressPools {
 			cfg.Pools = append(cfg.Pools, addressPool{Name: pool.Name, CIDR: pool.CIDR, DNS: append([]string(nil), pool.DNS...)})
@@ -951,7 +1063,9 @@ func (r *VPNGatewayReconciler) buildIPsecConfig(ctx context.Context, gw *sdnv1al
 	return json.Marshal(cfg)
 }
 
-func routingConfigFor(gw *sdnv1alpha1.VPNGateway, vpc *sdnv1alpha1.VPC) *vpnRoutingConfig {
+// routingConfigFor renders the active-active BGP contract; a hub advertises
+// every served VPC's CIDRs (docs/vpn.md §3.3).
+func routingConfigFor(gw *sdnv1alpha1.VPNGateway, servedVPCs []*sdnv1alpha1.VPC) *vpnRoutingConfig {
 	if haMode(gw) != sdnv1alpha1.VPNGatewayHAModeActiveActive || gw.Spec.HA == nil || gw.Spec.HA.ActiveActive == nil {
 		return nil
 	}
@@ -960,7 +1074,7 @@ func routingConfigFor(gw *sdnv1alpha1.VPNGateway, vpc *sdnv1alpha1.VPC) *vpnRout
 		LocalASN:       aa.LocalASN,
 		PeerASN:        aa.PeerASN,
 		PeerAddresses:  append([]string(nil), aa.PeerAddresses...),
-		AdvertiseCIDRs: append([]string(nil), vpc.Spec.CIDRs...),
+		AdvertiseCIDRs: unionVPCCIDRs(servedVPCs),
 		BFD:            aa.BFD,
 	}
 }
@@ -1105,45 +1219,106 @@ runcmd:
 `, base64.StdEncoding.EncodeToString(cfgJSON), backend)
 }
 
-// ensureBinding reconciles the VPCBinding that authorizes the appliance to
-// attach to the VPC and grants its scoped forwarding right (the union of the
-// connections' remote CIDRs). Same namespace as the gateway; the controller
-// holds the authority a tenant would not.
-func (r *VPNGatewayReconciler) ensureBinding(ctx context.Context, gw *sdnv1alpha1.VPNGateway, fwdCIDRs []string) error {
-	name := gw.Name + "-vpn"
-	desired := &sdnv1alpha1.VPCBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: gw.Namespace,
-			Labels:    map[string]string{vpnGatewayLabel: gw.Name},
-		},
-		Spec: sdnv1alpha1.VPCBindingSpec{
-			VPCRef:          sdnv1alpha1.VPCRef{Namespace: gw.Namespace, Name: gw.Spec.VPCRef.Name},
-			AllowForwarding: len(fwdCIDRs) > 0,
-			ForwardingCIDRs: fwdCIDRs,
-		},
-	}
-	if err := controllerutil.SetControllerReference(gw, desired, r.Scheme); err != nil {
-		return err
-	}
-	existing := &sdnv1alpha1.VPCBinding{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
-	switch {
-	case apierrors.IsNotFound(err):
-		if err := r.Create(ctx, desired); err != nil {
-			return fmt.Errorf("create VPCBinding: %w", err)
+// ensureBindings reconciles one VPCBinding per served VPC: each authorizes the
+// appliance to attach to that VPC and grants its scoped forwarding right (the
+// union of the connections' remote CIDRs). Same namespace as the gateway; the
+// controller holds the authority a tenant would not. Bindings for VPCs no
+// longer served are pruned by label (docs/vpn.md §3.3).
+func (r *VPNGatewayReconciler) ensureBindings(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
+	servedVPCs []*sdnv1alpha1.VPC, fwdCIDRs []string) error {
+	keep := map[string]bool{}
+	for i, vpc := range servedVPCs {
+		name := vpnBindingName(gw.Name, vpc.Name, i == 0)
+		keep[name] = true
+		desired := &sdnv1alpha1.VPCBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: gw.Namespace,
+				Labels:    map[string]string{vpnGatewayLabel: gw.Name},
+			},
+			Spec: sdnv1alpha1.VPCBindingSpec{
+				VPCRef:          sdnv1alpha1.VPCRef{Namespace: gw.Namespace, Name: vpc.Name},
+				AllowForwarding: len(fwdCIDRs) > 0,
+				ForwardingCIDRs: fwdCIDRs,
+			},
 		}
-	case err != nil:
-		return fmt.Errorf("get VPCBinding: %w", err)
-	default:
-		if !equality.Semantic.DeepEqual(existing.Spec, desired.Spec) {
-			existing.Spec = desired.Spec
-			if err := r.Update(ctx, existing); err != nil {
-				return fmt.Errorf("update VPCBinding: %w", err)
+		if err := controllerutil.SetControllerReference(gw, desired, r.Scheme); err != nil {
+			return err
+		}
+		existing := &sdnv1alpha1.VPCBinding{}
+		err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
+		switch {
+		case apierrors.IsNotFound(err):
+			if err := r.Create(ctx, desired); err != nil {
+				return fmt.Errorf("create VPCBinding: %w", err)
+			}
+		case err != nil:
+			return fmt.Errorf("get VPCBinding: %w", err)
+		default:
+			if !equality.Semantic.DeepEqual(existing.Spec, desired.Spec) {
+				existing.Spec = desired.Spec
+				if err := r.Update(ctx, existing); err != nil {
+					return fmt.Errorf("update VPCBinding: %w", err)
+				}
 			}
 		}
 	}
+	return r.pruneVPCBindings(ctx, gw, keep)
+}
+
+// vpnBindingName names the forwarding-grant binding for one served VPC. The
+// primary keeps the historical `<gw>-vpn` so existing gateways are untouched;
+// an additional VPC gets `<gw>-vpn-<vpc>`, hashed down when that would exceed
+// the 63-character object-name limit.
+func vpnBindingName(gateway, vpc string, primary bool) string {
+	if primary {
+		return gateway + "-vpn"
+	}
+	name := gateway + "-vpn-" + vpc
+	if len(name) <= 63 {
+		return name
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return fmt.Sprintf("%s-%08x", name[:63-9], h.Sum32())
+}
+
+// pruneVPCBindings deletes this gateway's bindings not named in keep (all of
+// them when keep is nil), so a VPC removed from the served set loses its grant.
+func (r *VPNGatewayReconciler) pruneVPCBindings(ctx context.Context, gw *sdnv1alpha1.VPNGateway, keep map[string]bool) error {
+	var list sdnv1alpha1.VPCBindingList
+	if err := r.List(ctx, &list, client.InNamespace(gw.Namespace), client.MatchingLabels{vpnGatewayLabel: gw.Name}); err != nil {
+		return fmt.Errorf("list VPN forwarding-grant VPCBindings: %w", err)
+	}
+	for i := range list.Items {
+		if keep[list.Items[i].Name] {
+			continue
+		}
+		if err := r.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete stale VPN VPCBinding %q: %w", list.Items[i].Name, err)
+		}
+	}
 	return nil
+}
+
+// vpnAttachmentAnnotations requests the appliance's VPC leg(s). A single-VPC
+// gateway keeps the original AnnotationVPC (existing pods are untouched); a hub
+// asks for one leg per served VPC through AnnotationNetworks, primary first —
+// entry 0 carries the fabric handle and the default route. The two annotations
+// are never both set: the CNI rejects that.
+func vpnAttachmentAnnotations(gw *sdnv1alpha1.VPNGateway) map[string]string {
+	if len(gw.Spec.AdditionalVPCRefs) == 0 {
+		return map[string]string{sdnv1alpha1.AnnotationVPC: gw.Spec.VPCRef.Name}
+	}
+	type entry struct {
+		VPC string `json:"vpc"`
+	}
+	entries := []entry{{VPC: gw.Spec.VPCRef.Name}}
+	for _, ref := range gw.Spec.AdditionalVPCRefs {
+		entries = append(entries, entry{VPC: ref.Name})
+	}
+	raw, _ := json.Marshal(entries)
+	return map[string]string{sdnv1alpha1.AnnotationNetworks: string(raw)}
 }
 
 // ensureDeployment reconciles the tunnel appliance — a VPC-attached pod running
@@ -1427,10 +1602,8 @@ func (r *VPNGatewayReconciler) deployment(gw *sdnv1alpha1.VPNGateway, backend, c
 	// oldest-wins resolution re-targets it to the survivor on a node loss.
 	// Per-connection metrics are served on :9410 for both backends: WireGuard
 	// reads kernel peer state and IPsec reads live IKE/CHILD SA state over VICI.
-	podAnnotations := map[string]string{
-		sdnv1alpha1.AnnotationVPC:   gw.Spec.VPCRef.Name,
-		vpnConfigChecksumAnnotation: checksum,
-	}
+	podAnnotations := vpnAttachmentAnnotations(gw)
+	podAnnotations[vpnConfigChecksumAnnotation] = checksum
 	ports := []corev1.ContainerPort{{Name: "vpn-metrics", ContainerPort: 9410, Protocol: corev1.ProtocolTCP}}
 	podAnnotations["prometheus.io/scrape"] = "true"
 	podAnnotations["prometheus.io/port"] = "9410"
@@ -1661,6 +1834,38 @@ func sortApplianceResolutions(out []applianceResolution, stableOrdinal bool) {
 		}
 		return out[i].Port < out[j].Port
 	})
+}
+
+// resolveVPCLegPorts returns, for one additional served VPC, the leg Ports of
+// exactly the appliances selected in the primary VPC, in the same order (so an
+// active-active ordinal keeps its slot). A leg not yet minted leaves a gap, and
+// the caller treats a short result as "not ready" (docs/vpn.md §3.3).
+func (r *VPNGatewayReconciler) resolveVPCLegPorts(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
+	vpc *sdnv1alpha1.VPC, appliances []applianceResolution) []string {
+	var ports sdnv1alpha1.PortList
+	if err := r.List(ctx, &ports, client.MatchingLabels{
+		sdnv1alpha1.LabelVPCNamespace: gw.Namespace,
+		sdnv1alpha1.LabelVPC:          vpc.Name,
+	}); err != nil {
+		return nil
+	}
+	byPod := map[string]string{}
+	for i := range ports.Items {
+		p := &ports.Items[i]
+		if p.Spec.PodNamespace != gw.Namespace || p.Spec.IP == "" {
+			continue
+		}
+		byPod[p.Spec.PodName] = p.Name
+	}
+	var out []string
+	for _, a := range appliances {
+		name, ok := byPod[a.PodName]
+		if !ok {
+			return nil
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // readApplianceStatus reads a small, secret-free JSON snapshot directly from

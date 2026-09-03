@@ -214,6 +214,7 @@ kind: VPNGateway                      # naming: see open questions, §9
 metadata: {namespace: tenant-a, name: site-vpn}
 spec:
   vpcRef: {name: vpc1}
+  additionalVPCRefs: [{name: vpc2}]   # optional — hub, §3.3
   wireguard: {listenPort: 51820}      # exactly one of wireguard | ipsec
   externalAddress:
     loadBalancerClass: ""             # cluster default
@@ -265,16 +266,18 @@ twelve, owning:
   v1 — §9 for HA): the appliance image plus a small shim binary. The pod holds
   `NET_ADMIN` in *its own netns only* — WireGuard device or xfrm state never
   touches the host.
-- the **`VPCBinding`** with `allowForwarding` and `forwardingCIDRs` set to the
-  union of the connections' `remoteCIDRs`. Creating a `VPNGateway` in the VPC
-  owner's namespace *is* the owner's grant; the controller merely writes it down.
+- one **`VPCBinding`** per served VPC (§3.3), each with `allowForwarding` and
+  `forwardingCIDRs` set to the union of the connections' `remoteCIDRs`. Creating a
+  `VPNGateway` in the VPC owner's namespace *is* the owner's grant; the
+  controller merely writes it down.
 - a **`FloatingIP`** targeting the appliance's VPC IP — the tunnel endpoint.
   This is the existing stateless bijection: inbound IKE/WG datagrams arrive with
   the client's real source; the appliance's own initiations leave wearing the
   floating address (`floating_egress` runs before the isolation block). Nothing
   new in the datapath; the platform's allocator (MetalLB, a CCM) attracts the
   address as ever.
-- **routes**: the effective route set for the VPC is the merge of the
+- **routes**: `status.routes` carries one entry per connection × served VPC
+  (§3.3). Within each served VPC the effective route set is the merge of the
   `VPCGateway`'s explicit `spec.routes` and the `remoteCIDRs` of every Ready
   `VPNConnection`. Longest prefix wins; an exact-prefix conflict between the two
   sources is refused with a condition, never resolved silently.
@@ -326,18 +329,50 @@ on reschedule; §3.5 is how to remove it.
 
 ### 3.3 Hub topology — several VPCs, one appliance
 
-Falls out of the existing primitives; no new mechanism. The appliance
-multi-attaches with a leg in each served VPC. Each spoke VPC consents on its own:
-its owner grants `allowForwarding` on *its* binding, and its `VPCGateway` routes
-the remote prefixes at *its* leg's Port. Nothing is transitive, no VPC sees
-another's grant, and each crossing is metered against the VPC it crosses.
+The managed path (§3.2) is now the primary mechanism. `VPNGateway.spec.vpcRef`
+stays the PRIMARY served VPC — FloatingIP endpoint, appliance default route,
+tunnel MTU budget — and optional `spec.additionalVPCRefs []LocalVPCRef` (same
+namespace, up to 9) names further VPCs the same appliance serves:
 
-Constraint, stated rather than engineered around: prefixes routed through one
-hub — the served VPCs' CIDRs and the remote sites' CIDRs together — must be
-disjoint, the same rule peering already imposes and for the same reason: routed
-traffic is delivered natively, and a router cannot serve two owners of one
-prefix. Overlapping CIDRs remain fully supported between VPCs that do not share
-a hub.
+```yaml
+apiVersion: sdn.cozystack.io/v1alpha1
+kind: VPNGateway
+metadata: {namespace: tenant-a, name: site-vpn}
+spec:
+  vpcRef: {name: vpc1}                 # PRIMARY — endpoint, default route, MTU budget
+  additionalVPCRefs: [{name: vpc2}, {name: vpc3}]
+  wireguard: {listenPort: 51820}
+```
+
+Granularity is per-gateway, not per-connection: every connection's
+`remoteCIDRs` route into every served VPC, and every served VPC reaches every
+connection's remote sites. The appliance multi-attaches, one leg per served VPC
+(`sdn.cozystack.io/networks`, entry 0 = primary; 10 legs total is the CNI's
+`maxAttachments`). The controller writes one `VPCBinding` per served VPC
+(primary `<gw>-vpn`, additional `<gw>-vpn-<vpc>`, same scoped grant, pruned by
+label when a VPC leaves the list); `status.routes` gets one entry per
+connection × served VPC, pointing at the *same selected appliance pod's* leg in
+that VPC — the tunnel itself lives only on the primary leg, and the agent
+already scopes a route by the VNI its next-hop Port encodes, so no datapath
+change. Nothing is transitive — no route from one served VPC to another is ever
+installed — and each leg stays anti-spoof-bounded by its own binding's
+`forwardingCIDRs`. Forbidden with `ha.mode: LiveMigration` (one-NIC KubeVirt
+VM; Multus multi-NIC is out of scope); active-active's BGP `AdvertiseCIDRs`
+become the union of every served VPC's CIDRs.
+
+Disjointness is enforced, not just stated: served VPCs' CIDRs must be pairwise
+disjoint or the controller holds the gateway `Pending` (`VPCCIDRsOverlap`), and
+a `remoteCIDR` overlapping any served VPC's CIDR is refused by the same
+route-CIDR deny-set behind `RemoteCIDRsAccepted` (reason "served VPC").
+Overlapping CIDRs remain fully supported between VPCs that don't share a hub —
+the rule is peering's, for the same reason: routed traffic is delivered
+natively, and a router cannot serve two owners of one prefix.
+
+A tenant-operated hub still falls out of the same primitives, unmanaged: a
+hand-attached appliance with a leg in each VPC, each spoke's owner granting
+`allowForwarding` on its own binding and routing the remote prefixes at its own
+leg's Port. Nothing transitive there either, and the same disjointness rule
+applies.
 
 ### 3.4 Roadwarrior
 
@@ -777,6 +812,30 @@ datapath, which the route-based design exists to avoid.
    credentials/pools and assigned-address status. Per-device WireGuard remains
    expressible as ordinary `VPNConnection` peers and is intentionally not a
    separate credential authority.
+6. **[DONE] Managed hub — one VPNGateway, several VPCs
+   (`spec.additionalVPCRefs`)** (§3.3):
+   - `VPNGateway.spec.additionalVPCRefs []LocalVPCRef` (same namespace as the
+     gateway, max 9) names further VPCs the appliance serves alongside the
+     PRIMARY `spec.vpcRef`, gateway-level: every connection's `remoteCIDRs`
+     route into every served VPC, and every served VPC reaches every
+     connection's remote sites.
+   - the appliance pod multi-attaches one leg per served VPC
+     (`sdn.cozystack.io/networks`, entry 0 = primary); the controller writes one
+     `VPCBinding` per served VPC (`<gw>-vpn` primary, `<gw>-vpn-<vpc>`
+     additional, same scoped `allowForwarding`/`forwardingCIDRs`, pruned by
+     label on removal) and one `status.routes` entry per connection × served
+     VPC, pointed at the primary-selected appliance pod's leg in that VPC — the
+     agent's existing VNI-scoped route lookup needed no change.
+   - the hub constraint is enforced, not just documented: overlapping
+     served-VPC CIDRs hold the gateway `Pending` (`VPCCIDRsOverlap`), and a
+     `remoteCIDR` overlapping a served VPC is refused via the route-CIDR
+     deny-set (`RemoteCIDRsAccepted`, reason "served VPC").
+   - the primary VPC keeps the encapsulation/default-route leg and the tunnel
+     MTU budget; active-active's `AdvertiseCIDRs` become the union of every
+     served VPC's CIDRs.
+   - **Known limitation**: forbidden with `ha.mode: LiveMigration` — the
+     KubeVirt VM appliance has a single NIC, and Multus multi-NIC for the
+     appliance VM is out of scope.
 
 Docs before code at every step, per the house rule — each increment updates this
 document and `docs/roadmap.md` as part of the change, not after.

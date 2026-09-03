@@ -1756,6 +1756,11 @@ func (in *VPNGatewayList) DeepCopyObject() runtime.Object {
 func (in *VPNGatewaySpec) DeepCopyInto(out *VPNGatewaySpec) {
 	*out = *in
 	out.VPCRef = in.VPCRef
+	if in.AdditionalVPCRefs != nil {
+		in, out := &in.AdditionalVPCRefs, &out.AdditionalVPCRefs
+		*out = make([]LocalVPCRef, len(*in))
+		copy(*out, *in)
+	}
 	if in.WireGuard != nil {
 		in, out := &in.WireGuard, &out.WireGuard
 		*out = new(VPNGatewayWireGuard)

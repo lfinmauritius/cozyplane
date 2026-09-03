@@ -2614,6 +2614,7 @@ func autoConvert_v1alpha1_VPNGatewaySpec_To_sdn_VPNGatewaySpec(in *VPNGatewaySpe
 	if err := Convert_v1alpha1_LocalVPCRef_To_sdn_LocalVPCRef(&in.VPCRef, &out.VPCRef, s); err != nil {
 		return err
 	}
+	out.AdditionalVPCRefs = *(*[]sdn.LocalVPCRef)(unsafe.Pointer(&in.AdditionalVPCRefs))
 	out.WireGuard = (*sdn.VPNGatewayWireGuard)(unsafe.Pointer(in.WireGuard))
 	out.IPsec = (*sdn.VPNGatewayIPsec)(unsafe.Pointer(in.IPsec))
 	if err := Convert_v1alpha1_VPNExternalAddress_To_sdn_VPNExternalAddress(&in.ExternalAddress, &out.ExternalAddress, s); err != nil {
@@ -2633,6 +2634,7 @@ func autoConvert_sdn_VPNGatewaySpec_To_v1alpha1_VPNGatewaySpec(in *sdn.VPNGatewa
 	if err := Convert_sdn_LocalVPCRef_To_v1alpha1_LocalVPCRef(&in.VPCRef, &out.VPCRef, s); err != nil {
 		return err
 	}
+	out.AdditionalVPCRefs = *(*[]LocalVPCRef)(unsafe.Pointer(&in.AdditionalVPCRefs))
 	out.WireGuard = (*VPNGatewayWireGuard)(unsafe.Pointer(in.WireGuard))
 	out.IPsec = (*VPNGatewayIPsec)(unsafe.Pointer(in.IPsec))
 	if err := Convert_sdn_VPNExternalAddress_To_v1alpha1_VPNExternalAddress(&in.ExternalAddress, &out.ExternalAddress, s); err != nil {

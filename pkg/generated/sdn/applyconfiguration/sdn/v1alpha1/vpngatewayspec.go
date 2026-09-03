@@ -24,7 +24,15 @@ package v1alpha1
 // VPNGatewaySpec declares a managed tunnel endpoint for a VPC (issue #6).
 type VPNGatewaySpecApplyConfiguration struct {
 	// VPCRef is the VPC this gateway terminates tunnels into, in this namespace.
+	// It is the PRIMARY served VPC: the appliance's default route, its endpoint
+	// FloatingIP and the tunnel MTU budget all belong to it.
 	VPCRef *LocalVPCRefApplyConfiguration `json:"vpcRef,omitempty"`
+	// AdditionalVPCRefs are further VPCs this gateway serves (hub, docs/vpn.md
+	// §3.3): every connection's remoteCIDRs are routed into each of them, and
+	// each of them reaches every connection's remote sites. Same namespace as the
+	// gateway. Served VPCs' CIDRs must be pairwise disjoint. Forbidden with
+	// ha.mode=LiveMigration.
+	AdditionalVPCRefs []LocalVPCRefApplyConfiguration `json:"additionalVPCRefs,omitempty"`
 	// WireGuard configures a WireGuard endpoint. Exactly one tunnel backend is
 	// set per gateway.
 	WireGuard *VPNGatewayWireGuardApplyConfiguration `json:"wireguard,omitempty"`
@@ -56,6 +64,19 @@ func VPNGatewaySpec() *VPNGatewaySpecApplyConfiguration {
 // If called multiple times, the VPCRef field is set to the value of the last call.
 func (b *VPNGatewaySpecApplyConfiguration) WithVPCRef(value *LocalVPCRefApplyConfiguration) *VPNGatewaySpecApplyConfiguration {
 	b.VPCRef = value
+	return b
+}
+
+// WithAdditionalVPCRefs adds the given value to the AdditionalVPCRefs field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the AdditionalVPCRefs field.
+func (b *VPNGatewaySpecApplyConfiguration) WithAdditionalVPCRefs(values ...*LocalVPCRefApplyConfiguration) *VPNGatewaySpecApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithAdditionalVPCRefs")
+		}
+		b.AdditionalVPCRefs = append(b.AdditionalVPCRefs, *values[i])
+	}
 	return b
 }
 

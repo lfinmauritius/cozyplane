@@ -185,7 +185,20 @@ type VPNExternalAddress struct {
 // VPNGatewaySpec declares a managed tunnel endpoint for a VPC (issue #6).
 type VPNGatewaySpec struct {
 	// VPCRef is the VPC this gateway terminates tunnels into, in this namespace.
+	// It is the PRIMARY served VPC: the appliance's default route, its endpoint
+	// FloatingIP and the tunnel MTU budget all belong to it.
 	VPCRef LocalVPCRef `json:"vpcRef"`
+
+	// AdditionalVPCRefs are further VPCs this gateway serves (hub, docs/vpn.md
+	// §3.3): every connection's remoteCIDRs are routed into each of them, and
+	// each of them reaches every connection's remote sites. Same namespace as the
+	// gateway. Served VPCs' CIDRs must be pairwise disjoint. Forbidden with
+	// ha.mode=LiveMigration.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=9
+	AdditionalVPCRefs []LocalVPCRef `json:"additionalVPCRefs,omitempty"`
 
 	// WireGuard configures a WireGuard endpoint. Exactly one tunnel backend is
 	// set per gateway.
