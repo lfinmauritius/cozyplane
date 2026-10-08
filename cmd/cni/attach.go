@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -38,6 +39,11 @@ import (
 // and the alternative — a shorter container-ID slice — trades a real property
 // (names that stay distinct across concurrent sandboxes) for a hypothetical one.
 const maxAttachments = 10
+
+const (
+	maxNetworksAnnotationBytes = 16 * 1024
+	maxVPCReferenceBytes       = 63 + 1 + 253
+)
 
 // maxDelegates bounds legacy netN Multus interface names by the one character
 // available in their backwards-compatible host-veth name: net0..net25.
@@ -104,6 +110,46 @@ type netEntry struct {
 	Name string `json:"name,omitempty"`
 }
 
+func parseNetworkEntries(text string) ([]netEntry, error) {
+	if len(text) > maxNetworksAnnotationBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", networksAnnotation, maxNetworksAnnotationBytes)
+	}
+	decoder := json.NewDecoder(strings.NewReader(text))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('[') {
+		return nil, fmt.Errorf("%s must be a JSON list of network entries", networksAnnotation)
+	}
+	var entries []netEntry
+	seen := map[string]bool{}
+	for decoder.More() {
+		if len(entries) >= maxAttachments {
+			return nil, fmt.Errorf("%s exceeds the %d-entry limit", networksAnnotation, maxAttachments)
+		}
+		var entry netEntry
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, fmt.Errorf("%s has an invalid JSON entry at index %d", networksAnnotation, len(entries))
+		}
+		if len(entry.VPC) > maxVPCReferenceBytes || len(entry.IP) > 45 || len(entry.MAC) > 23 || len(entry.Name) > 15 {
+			return nil, fmt.Errorf("%s entry %d exceeds a field length limit", networksAnnotation, len(entries))
+		}
+		if entry.Name != "" {
+			if seen[entry.Name] {
+				return nil, fmt.Errorf("%s repeats an interface name at index %d", networksAnnotation, len(entries))
+			}
+			seen[entry.Name] = true
+		}
+		entries = append(entries, entry)
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim(']') {
+		return nil, fmt.Errorf("%s has an incomplete JSON list", networksAnnotation)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, fmt.Errorf("%s contains trailing JSON data", networksAnnotation)
+	}
+	return entries, nil
+}
+
 // parseAttachments turns the pod's annotations into the ordered attachment list.
 // It returns nil (no error) when the pod requests no VPC at all — the
 // default-network case.
@@ -119,6 +165,9 @@ func parseAttachments(vpcAnno, networksAnno, podNS string) ([]attachment, error)
 	}
 
 	if vpcAnno != "" {
+		if len(vpcAnno) > maxVPCReferenceBytes {
+			return nil, fmt.Errorf("%s exceeds the VPC reference length limit", vpcAnnotation)
+		}
 		ns, name := parseVPCRef(vpcAnno, podNS)
 		return []attachment{{Index: 0, VPCNamespace: ns, VPCName: name, IfName: contVethName}}, nil
 	}
@@ -126,16 +175,12 @@ func parseAttachments(vpcAnno, networksAnno, podNS string) ([]attachment, error)
 		return nil, nil
 	}
 
-	var entries []netEntry
-	if err := json.Unmarshal([]byte(networksAnno), &entries); err != nil {
-		return nil, fmt.Errorf("%s is not a JSON list of network entries: %w", networksAnnotation, err)
+	entries, err := parseNetworkEntries(networksAnno)
+	if err != nil {
+		return nil, err
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("%s is an empty list: omit it to stay on the default network", networksAnnotation)
-	}
-	if len(entries) > maxAttachments {
-		return nil, fmt.Errorf("%s asks for %d attachments; the limit is %d (host interface names)",
-			networksAnnotation, len(entries), maxAttachments)
 	}
 
 	out := make([]attachment, 0, len(entries))
@@ -254,6 +299,9 @@ func delegateAttachment(confVPC, ifName, networksAnno, podNS string) (attachment
 	if confVPC == "" {
 		return attachment{}, fmt.Errorf("delegate mode needs a vpc in the plugin config")
 	}
+	if len(confVPC) > maxVPCReferenceBytes {
+		return attachment{}, fmt.Errorf("delegate VPC reference exceeds the length limit")
+	}
 	idx, err := delegateIndex(ifName)
 	if err != nil {
 		return attachment{}, err
@@ -264,9 +312,9 @@ func delegateAttachment(confVPC, ifName, networksAnno, podNS string) (attachment
 	if networksAnno == "" {
 		return a, nil
 	}
-	var entries []netEntry
-	if err := json.Unmarshal([]byte(networksAnno), &entries); err != nil {
-		return attachment{}, fmt.Errorf("%s is not a JSON list of network entries: %w", networksAnnotation, err)
+	entries, err := parseNetworkEntries(networksAnno)
+	if err != nil {
+		return attachment{}, err
 	}
 	for i, e := range entries {
 		if e.Name != ifName {

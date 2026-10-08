@@ -139,6 +139,12 @@ type VPNConnectionIPsec struct {
 	// +optional
 	PeerAddress string `json:"peerAddress,omitempty"`
 
+	// RemoteIdentity binds a PSK to this exact IKE identity. When omitted, an
+	// IP-valued PeerAddress supplies the identity. Required for PSK responders
+	// without a fixed IP endpoint and for endpoints named by DNS.
+	// +optional
+	RemoteIdentity string `json:"remoteIdentity,omitempty"`
+
 	// Auth is how the peer authenticates.
 	Auth VPNConnectionIPsecAuth `json:"auth"`
 

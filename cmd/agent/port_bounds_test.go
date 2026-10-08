@@ -31,7 +31,7 @@ func TestSecurityGroupPortCompilersFailClosed(t *testing.T) {
 		for _, port := range []int32{-1, 0, 1, 65535, 65536, 65537, math.MaxInt32} {
 			t.Run(protocol+"/"+strconv.FormatInt(int64(port), 10), func(t *testing.T) {
 				ports := []sdnv1alpha1.SecurityGroupPort{{Protocol: protocol, Port: port}}
-				valid := (protocol == "TCP" || protocol == "UDP") && port >= 1 && port <= 65535
+				valid := (protocol == "TCP" || protocol == "UDP") && port >= 0 && port <= 65535
 				got := [][]uint16{{}, {}, {}, {}}
 				for _, rule := range compileRulePorts(100, 101, 1, 1, ports) {
 					got[0] = append(got[0], rule.Port)

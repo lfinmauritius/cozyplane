@@ -17,6 +17,7 @@ limitations under the License.
 package datapath
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/cilium/ebpf"
@@ -72,19 +73,23 @@ func (c VPCCounter) NorthSouthBytes() uint64 {
 // seeds one per VPC net when it programs the network. Idempotent; a net's
 // first few packets before this runs are simply uncounted.
 func (m *Manager) EnsureVPCCounter(net uint32) error {
-	if net == 0 {
+	m.counterMu.Lock()
+	defer m.counterMu.Unlock()
+	if net == 0 || (m.counterScopes != nil && !m.counterScopes[net]) {
 		return nil
 	}
 	var existing []overlayVpcCounter
 	if err := m.objs.VpcCounters.Lookup(net, &existing); err == nil {
 		return nil // already seeded; don't clobber live counts
+	} else if !isNotExist(err) {
+		return fmt.Errorf("lookup vpc_counter for net %d: %w", net, err)
 	}
 	ncpu, err := ebpf.PossibleCPU()
 	if err != nil {
 		return fmt.Errorf("possible CPUs: %w", err)
 	}
 	zero := make([]overlayVpcCounter, ncpu)
-	if err := m.objs.VpcCounters.Put(net, zero); err != nil {
+	if err := m.objs.VpcCounters.Update(net, zero, ebpf.UpdateNoExist); err != nil && !errors.Is(err, ebpf.ErrKeyExist) {
 		return fmt.Errorf("seed vpc_counter for net %d: %w", net, err)
 	}
 	return nil

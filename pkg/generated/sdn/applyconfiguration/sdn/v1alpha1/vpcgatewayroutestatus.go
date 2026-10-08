@@ -23,6 +23,9 @@ package v1alpha1
 //
 // VPCGatewayRouteStatus reports one resolved route.
 type VPCGatewayRouteStatusApplyConfiguration struct {
+	// VPCRef scopes a VPN route to a declared same-namespace served VPC.
+	// Empty means the parent gateway's primary VPC. VPCGateway ignores it.
+	VPCRef *LocalVPCRefApplyConfiguration `json:"vpcRef,omitempty"`
 	// CIDRs echoes the spec route's prefixes.
 	CIDRs []string `json:"cidrs,omitempty"`
 	// Port is the cluster-scoped Port name the CIDRs were programmed toward,
@@ -38,6 +41,14 @@ type VPCGatewayRouteStatusApplyConfiguration struct {
 // apply.
 func VPCGatewayRouteStatus() *VPCGatewayRouteStatusApplyConfiguration {
 	return &VPCGatewayRouteStatusApplyConfiguration{}
+}
+
+// WithVPCRef sets the VPCRef field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the VPCRef field is set to the value of the last call.
+func (b *VPCGatewayRouteStatusApplyConfiguration) WithVPCRef(value *LocalVPCRefApplyConfiguration) *VPCGatewayRouteStatusApplyConfiguration {
+	b.VPCRef = value
+	return b
 }
 
 // WithCIDRs adds the given value to the CIDRs field in the declarative configuration

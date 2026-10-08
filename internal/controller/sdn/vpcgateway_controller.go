@@ -19,6 +19,7 @@ package sdn
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 
@@ -27,15 +28,19 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/lllamnyp/cozyplane/api/sdn"
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
+	"github.com/lllamnyp/cozyplane/internal/vpnlimits"
 )
 
 // VPCGatewayReconciler owns a VPCGateway's status: does its VPC exist, is it the
@@ -48,7 +53,8 @@ import (
 // all three of them then read.
 type VPCGatewayReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme        *runtime.Scheme
+	InternalCIDRs []*net.IPNet
 }
 
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpcgateways,verbs=get;list;watch
@@ -69,9 +75,9 @@ func (r *VPCGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	vpcOK := false
 	vpc := &sdnv1alpha1.VPC{}
-	if name := gw.Spec.VPCRef.Name; name != "" {
+	if name := gw.Spec.VPCRef.Name; vpnlimits.ObjectName(name) {
 		err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: name}, vpc)
-		vpcOK = err == nil
+		vpcOK = err == nil && vpc.DeletionTimestamp.IsZero()
 		if err != nil && !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("fetch VPC: %w", err)
 		}
@@ -81,7 +87,7 @@ func (r *VPCGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	exclusive := conflict == ""
+	exclusive := conflict == "" && gw.DeletionTimestamp.IsZero()
 
 	// The VPC's egress identity: an address of its OWN, drawn from a delegated
 	// Service (one per family), not a pool. Without one, its traffic is SNATed to the
@@ -109,8 +115,10 @@ func (r *VPCGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-	} else if err := r.clearAppliancePorts(ctx, gw, vpc, ""); err != nil {
-		return ctrl.Result{}, err
+	} else if exclusive {
+		if err := r.clearAppliancePorts(ctx, gw, vpc, ""); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// The per-VPC route table (issue #6): resolve each route's next-hop selector
@@ -119,11 +127,13 @@ func (r *VPCGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// the forwarding grant.
 	var routeStatus []sdnv1alpha1.VPCGatewayRouteStatus
 	routesProblem := ""
-	if len(gw.Spec.Routes) > 0 && vpcOK {
+	if len(gw.Spec.Routes) > 0 && vpcOK && exclusive {
 		routeStatus, routesProblem, err = r.reconcileRoutes(ctx, gw, vpc)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+	} else if len(gw.Spec.Routes) > 0 {
+		routesProblem = "routes require a resolved VPC and its active exclusive gateway"
 	}
 
 	status := sdnv1alpha1.VPCGatewayStatus{
@@ -193,8 +203,11 @@ func (r *VPCGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 // — that is what makes "everything crosses it" checkable and the per-VPC counters
 // unambiguous. First writer wins, ties broken by name so replicas agree.
 func (r *VPCGatewayReconciler) conflictingGateway(ctx context.Context, gw *sdnv1alpha1.VPCGateway) (string, error) {
+	if !vpnlimits.ObjectName(gw.Spec.VPCRef.Name) {
+		return "", nil
+	}
 	var list sdnv1alpha1.VPCGatewayList
-	if err := r.List(ctx, &list, client.InNamespace(gw.Namespace)); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(gw.Namespace), client.MatchingFields{gatewayVPCIndex: gw.Spec.VPCRef.Name}); err != nil {
 		return "", fmt.Errorf("list VPCGateways: %w", err)
 	}
 	for i := range list.Items {
@@ -395,9 +408,7 @@ func (r *VPCGatewayReconciler) ensureNATEndpointSlice(ctx context.Context, svc *
 	}}
 
 	key := client.ObjectKey{Namespace: svc.Namespace, Name: svc.Name}
-	existing := &discoveryv1.EndpointSlice{}
-	switch err := r.Get(ctx, key, existing); {
-	case apierrors.IsNotFound(err):
+	create := func() error {
 		slice := &discoveryv1.EndpointSlice{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      svc.Name,
@@ -419,14 +430,22 @@ func (r *VPCGatewayReconciler) ensureNATEndpointSlice(ctx context.Context, svc *
 			return fmt.Errorf("create NAT endpointslice: %w", err)
 		}
 		return nil
+	}
+	existing := &discoveryv1.EndpointSlice{}
+	switch err := r.Get(ctx, key, existing); {
+	case apierrors.IsNotFound(err):
+		return create()
 	case err != nil:
 		return fmt.Errorf("get NAT endpointslice: %w", err)
 	}
+	if !metav1.IsControlledBy(existing, svc) {
+		return fmt.Errorf("endpointslice %s/%s is not controlled by service UID %s", existing.Namespace, existing.Name, svc.UID)
+	}
 	if existing.AddressType != addrType {
-		if err := r.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, existing, client.Preconditions{UID: &existing.UID, ResourceVersion: &existing.ResourceVersion}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete NAT endpointslice for family change: %w", err)
 		}
-		return r.ensureNATEndpointSlice(ctx, svc, gw, f, addr)
+		return create()
 	}
 	existing.Endpoints = []discoveryv1.Endpoint{ep}
 	existing.Ports = ports
@@ -443,7 +462,7 @@ func (r *VPCGatewayReconciler) deleteNATFamilyService(ctx context.Context, gw *s
 	if err != nil || svc == nil {
 		return err
 	}
-	if err := r.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Delete(ctx, svc, client.Preconditions{UID: &svc.UID, ResourceVersion: &svc.ResourceVersion}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete NAT service: %w", err)
 	}
 	return nil
@@ -529,6 +548,9 @@ func applianceMessage(port, problem string) string {
 // desiredGateways reads to build gateways[vni].
 func (r *VPCGatewayReconciler) reconcileAppliance(ctx context.Context, gw *sdnv1alpha1.VPCGateway,
 	vpc *sdnv1alpha1.VPC) (chosen string, problem string, err error) {
+	if ns := gw.Spec.Appliance.Namespace; ns != "" && !vpnlimits.NamespaceName(ns) {
+		return "", "spec.appliance.namespace is not a valid namespace", r.clearAppliancePorts(ctx, gw, vpc, "")
+	}
 	sel, e := metav1.LabelSelectorAsSelector(&gw.Spec.Appliance.PodSelector)
 	if e != nil {
 		return "", fmt.Sprintf("spec.appliance.podSelector is invalid: %v", e), nil
@@ -553,18 +575,27 @@ func (r *VPCGatewayReconciler) reconcileAppliance(ctx context.Context, gw *sdnv1
 		return "", "", fmt.Errorf("list VPC ports: %w", err)
 	}
 
-	live := map[string]bool{}
+	live := map[string]*corev1.Pod{}
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		if p.DeletionTimestamp == nil {
-			live[p.Namespace+"/"+p.Name] = true
+			live[p.Namespace+"/"+p.Name] = p
 		}
 	}
 
 	var candidates []*sdnv1alpha1.Port
+	sandboxes := podSandboxSnapshot{}
 	for i := range ports.Items {
 		p := &ports.Items[i]
-		if live[p.Spec.PodNamespace+"/"+p.Spec.PodName] {
+		pod := live[p.Spec.PodNamespace+"/"+p.Spec.PodName]
+		if !currentNextHopClaim(p, vpc, pod) {
+			continue
+		}
+		sandbox, err := sandboxes.forPod(ctx, r.Client, pod)
+		if err != nil {
+			return "", "", err
+		}
+		if nextHopSandboxMatches(p, sandbox) {
 			candidates = append(candidates, p)
 		}
 	}
@@ -608,9 +639,32 @@ func (r *VPCGatewayReconciler) reconcileAppliance(ctx context.Context, gw *sdnv1
 // and returns the per-route status. Unlike the appliance it never sets
 // spec.gateway — a route target is a forwarding leg, not the VPC's whole door.
 // An unresolved route yields an empty Port (and a problem message aggregating
-// the offenders); the datapath simply has no entry for it.
+// the offenders); the protected prefix remains an explicit blackhole.
 func (r *VPCGatewayReconciler) reconcileRoutes(ctx context.Context, gw *sdnv1alpha1.VPCGateway,
 	vpc *sdnv1alpha1.VPC) (out []sdnv1alpha1.VPCGatewayRouteStatus, problem string, err error) {
+	const maxInputs = 4096
+	const maxWork = 1 << 20
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if len(gw.Spec.Routes) > maxInputs {
+		return nil, "route declarations exceed 4096", nil
+	}
+	prefixes := 0
+	for _, route := range gw.Spec.Routes {
+		if len(route.CIDRs) > maxInputs-prefixes {
+			return nil, "route prefix candidates exceed 4096", nil
+		}
+		prefixes += len(route.CIDRs)
+	}
+	work := len(gw.Spec.Routes) + prefixes
+	charge := func(n int) bool {
+		if n > maxWork-work {
+			return false
+		}
+		work += n
+		return true
+	}
 	// All Ports of this VPC, listed once and reused across routes.
 	var ports sdnv1alpha1.PortList
 	if err := r.List(ctx, &ports, client.MatchingLabels{
@@ -619,14 +673,56 @@ func (r *VPCGatewayReconciler) reconcileRoutes(ctx context.Context, gw *sdnv1alp
 	}); err != nil {
 		return nil, "", fmt.Errorf("list VPC ports: %w", err)
 	}
+	if !charge(len(ports.Items)) {
+		return nil, "route resolution exceeds 1048576 input operations", nil
+	}
+	portsByPod := map[string][]*sdnv1alpha1.Port{}
+	for j := range ports.Items {
+		p := &ports.Items[j]
+		if currentVPCPortClaim(p, vpc) {
+			key := p.Spec.PodNamespace + "/" + p.Spec.PodName
+			portsByPod[key] = append(portsByPod[key], p)
+		}
+	}
 
+	sandboxes := podSandboxSnapshot{}
 	var unresolved []string
+	problemCount := 0
+	noteProblem := func(message string) {
+		problemCount++
+		if len(unresolved) == 32 {
+			return
+		}
+		if len(message) > 96 {
+			message = message[:93] + "..."
+		}
+		unresolved = append(unresolved, message)
+	}
 	for i := range gw.Spec.Routes {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		route := &gw.Spec.Routes[i]
-		st := sdnv1alpha1.VPCGatewayRouteStatus{CIDRs: route.CIDRs}
+		st := sdnv1alpha1.VPCGatewayRouteStatus{}
+		for _, cidr := range route.CIDRs {
+			if reason := forbiddenRouteCIDR(cidr, r.InternalCIDRs); reason != "" {
+				noteProblem(fmt.Sprintf("route %d: %.64s (%s)", i, cidr, reason))
+				continue
+			}
+			st.CIDRs = append(st.CIDRs, cidr)
+		}
+		if len(st.CIDRs) == 0 {
+			out = append(out, st)
+			continue
+		}
+		if ns := route.Via.Namespace; ns != "" && !vpnlimits.NamespaceName(ns) {
+			noteProblem(fmt.Sprintf("route %d: invalid next-hop namespace", i))
+			out = append(out, st) // Keep every accepted prefix as a blackhole.
+			continue
+		}
 		sel, e := metav1.LabelSelectorAsSelector(&route.Via.PodSelector)
 		if e != nil {
-			unresolved = append(unresolved, fmt.Sprintf("route %d: invalid selector: %v", i, e))
+			noteProblem(fmt.Sprintf("route %d: invalid selector: %v", i, e))
 			out = append(out, st)
 			continue
 		}
@@ -638,34 +734,75 @@ func (r *VPCGatewayReconciler) reconcileRoutes(ctx context.Context, gw *sdnv1alp
 		if err := r.List(ctx, &pods, client.InNamespace(ns), client.MatchingLabelsSelector{Selector: sel}); err != nil {
 			return nil, "", fmt.Errorf("list route pods: %w", err)
 		}
-		live := map[string]bool{}
-		for j := range pods.Items {
-			if pods.Items[j].DeletionTimestamp == nil {
-				live[pods.Items[j].Namespace+"/"+pods.Items[j].Name] = true
-			}
+		if !charge(len(pods.Items)) {
+			return nil, "route resolution exceeds 1048576 input operations", nil
 		}
 		var best *sdnv1alpha1.Port
-		for j := range ports.Items {
-			p := &ports.Items[j]
-			if !live[p.Spec.PodNamespace+"/"+p.Spec.PodName] {
-				continue
+		for j := range pods.Items {
+			pod := &pods.Items[j]
+			candidates := portsByPod[pod.Namespace+"/"+pod.Name]
+			if !charge(len(candidates)) {
+				return nil, "route resolution exceeds 1048576 input operations", nil
 			}
-			if best == nil || p.CreationTimestamp.Before(&best.CreationTimestamp) ||
-				(p.CreationTimestamp.Equal(&best.CreationTimestamp) && p.Name < best.Name) {
-				best = p
+			for _, p := range candidates {
+				if !currentNextHopClaim(p, vpc, pod) {
+					continue
+				}
+				if !charge(2) {
+					return nil, "route resolution exceeds 1048576 input operations", nil
+				}
+				sandbox, err := sandboxes.forPod(ctx, r.Client, pod)
+				if err != nil {
+					return nil, "", err
+				}
+				if !nextHopSandboxMatches(p, sandbox) {
+					continue
+				}
+				if best == nil || p.CreationTimestamp.Before(&best.CreationTimestamp) ||
+					(p.CreationTimestamp.Equal(&best.CreationTimestamp) && p.Name < best.Name) {
+					best = p
+				}
 			}
 		}
 		if best == nil {
-			unresolved = append(unresolved, fmt.Sprintf("route %d: no live selected Port in VPC %q", i, vpc.Name))
+			noteProblem(fmt.Sprintf("route %d: no live selected Port in VPC %q", i, vpc.Name))
 		} else {
 			st.Port = best.Name
 		}
 		out = append(out, st)
 	}
 	if len(unresolved) > 0 {
+		if problemCount > len(unresolved) {
+			unresolved = append(unresolved, fmt.Sprintf("%d additional route problems omitted", problemCount-len(unresolved)))
+		}
 		problem = strings.Join(unresolved, "; ")
 	}
 	return out, problem, nil
+}
+
+// currentNextHopClaim binds selector authority to the current pod and VPC.
+func currentNextHopClaim(port *sdnv1alpha1.Port, vpc *sdnv1alpha1.VPC, pod *corev1.Pod) bool {
+	if pod == nil || pod.UID == "" || pod.DeletionTimestamp != nil ||
+		pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed ||
+		port.Labels[sdnv1alpha1.LabelPodUID] != string(pod.UID) {
+		return false
+	}
+	return currentVPCPortClaim(port, vpc)
+}
+
+// Missing/legacy FabricIP identity cannot revoke a claim. A positive witness
+// can exclude old sandboxes immediately, independently of the GC grace period.
+func nextHopSandboxMatches(port *sdnv1alpha1.Port, sandbox string) bool {
+	return sandbox == "" || port.Annotations[sdnv1alpha1.AnnotationContainerID] == sandbox
+}
+
+func currentVPCPortClaim(port *sdnv1alpha1.Port, vpc *sdnv1alpha1.VPC) bool {
+	if port.DeletionTimestamp != nil || vpc.DeletionTimestamp != nil ||
+		port.Spec.VPCRef.Namespace != vpc.Namespace || port.Spec.VPCRef.Name != vpc.Name || vpc.Status.VNI <= 0 {
+		return false
+	}
+	ip := net.ParseIP(port.Spec.IP)
+	return ip != nil && port.Name == sdn.PortName(vpc.Status.VNI, ip.String())
 }
 
 // clearAppliancePorts takes spec.gateway off every Port of this VPC except
@@ -710,27 +847,37 @@ func (r *VPCGatewayReconciler) clearAppliancePorts(ctx context.Context, gw *sdnv
 
 // SetupWithManager wires the controller.
 func (r *VPCGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Shared by managed system-gateway healing and VPN appliance resolution.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sdnv1alpha1.Port{}, vpnAppliancePodIndex, vpnAppliancePodKeys); err != nil {
+		return err
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sdnv1alpha1.VPCGateway{}, gatewayVPCIndex, gatewayVPCKeys); err != nil {
+		return err
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sdnv1alpha1.VPCGateway{}, gatewayPodNamespaceIndex, gatewayPodNamespaceKeys); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sdnv1alpha1.VPCGateway{}).
 		Owns(&corev1.Service{}). // re-reconcile when an owned NAT Service's LB ingress fills
 		Watches(&sdnv1alpha1.VPC{}, handler.EnqueueRequestsFromMapFunc(r.mapVPCToGateways)).
 		// An appliance's Port appears at CNI ADD and vanishes at DEL, and its pod
 		// is normally replaced under it (a Deployment, a VM). The door has to
-		// follow, so both re-enqueue the gateways of their namespace.
+		// follow, so Port events re-enqueue the gateways of their VPC.
 		Watches(&sdnv1alpha1.Port{}, handler.EnqueueRequestsFromMapFunc(r.mapPortToGateways)).
-		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToGateways)).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToGateways), builder.WithPredicates(gatewayPodEvents())).
 		Named("vpcgateway").
 		Complete(r)
 }
 
-// mapPortToGateways re-enqueues the gateways of the Port's VPC namespace. Only
-// gateways that declare an appliance care, and Reconcile is cheap for the rest.
+// mapPortToGateways re-enqueues appliance and route gateways of the Port's VPC.
 func (r *VPCGatewayReconciler) mapPortToGateways(ctx context.Context, obj client.Object) []ctrl.Request {
 	ns := obj.GetLabels()[sdnv1alpha1.LabelVPCNamespace]
-	if ns == "" {
+	name := obj.GetLabels()[sdnv1alpha1.LabelVPC]
+	if ns == "" || name == "" {
 		return nil
 	}
-	return r.gatewaysIn(ctx, ns)
+	return r.gatewaysIn(ctx, ns, name)
 }
 
 // mapPodToGateways re-enqueues the gateways that could select this pod — as an
@@ -738,43 +885,51 @@ func (r *VPCGatewayReconciler) mapPortToGateways(ctx context.Context, obj client
 // selectors actually look in, so ordinary pod churn costs a cache list and
 // nothing more.
 func (r *VPCGatewayReconciler) mapPodToGateways(ctx context.Context, obj client.Object) []ctrl.Request {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
 	var list sdnv1alpha1.VPCGatewayList
-	if err := r.List(ctx, &list); err != nil {
+	if err := r.List(ctx, &list, client.MatchingFields{gatewayPodNamespaceIndex: pod.Namespace}); err != nil {
 		return nil
 	}
 	var out []ctrl.Request
 	for i := range list.Items {
 		g := &list.Items[i]
-		if gatewaySelectsNamespace(g, obj.GetNamespace()) {
+		if gatewaySelectsPod(g, pod) {
 			out = append(out, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(g)})
 		}
 	}
 	return out
 }
 
-// gatewaySelectsNamespace reports whether a gateway's appliance or any of its
-// routes selects pods in ns.
-func gatewaySelectsNamespace(g *sdnv1alpha1.VPCGateway, ns string) bool {
-	sel := func(selNS string) bool {
+// gatewaySelectsPod checks actual labels as well as selector namespace. The
+// event handler maps old and new Pods, preserving label-removal revocation.
+func gatewaySelectsPod(g *sdnv1alpha1.VPCGateway, pod *corev1.Pod) bool {
+	sel := func(selNS string, labelSelector metav1.LabelSelector) bool {
 		if selNS == "" {
 			selNS = g.Namespace
 		}
-		return selNS == ns
+		if selNS != pod.Namespace {
+			return false
+		}
+		s, err := metav1.LabelSelectorAsSelector(&labelSelector)
+		return err == nil && s.Matches(labels.Set(pod.Labels))
 	}
-	if g.Spec.Appliance != nil && sel(g.Spec.Appliance.Namespace) {
+	if g.Spec.Appliance != nil && sel(g.Spec.Appliance.Namespace, g.Spec.Appliance.PodSelector) {
 		return true
 	}
 	for i := range g.Spec.Routes {
-		if sel(g.Spec.Routes[i].Via.Namespace) {
+		if sel(g.Spec.Routes[i].Via.Namespace, g.Spec.Routes[i].Via.PodSelector) {
 			return true
 		}
 	}
 	return false
 }
 
-func (r *VPCGatewayReconciler) gatewaysIn(ctx context.Context, namespace string) []ctrl.Request {
+func (r *VPCGatewayReconciler) gatewaysIn(ctx context.Context, namespace, vpcName string) []ctrl.Request {
 	var list sdnv1alpha1.VPCGatewayList
-	if err := r.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(namespace), client.MatchingFields{gatewayVPCIndex: vpcName}); err != nil {
 		return nil
 	}
 	var out []ctrl.Request
@@ -788,7 +943,7 @@ func (r *VPCGatewayReconciler) gatewaysIn(ctx context.Context, namespace string)
 
 func (r *VPCGatewayReconciler) mapVPCToGateways(ctx context.Context, obj client.Object) []ctrl.Request {
 	var list sdnv1alpha1.VPCGatewayList
-	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace()), client.MatchingFields{gatewayVPCIndex: obj.GetName()}); err != nil {
 		return nil
 	}
 	var out []ctrl.Request

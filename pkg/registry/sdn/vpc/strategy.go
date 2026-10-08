@@ -25,6 +25,7 @@ import (
 	"slices"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
+	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
 	"github.com/lllamnyp/cozyplane/pkg/registry/sdn/authz"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -124,26 +125,19 @@ func validateVPCSpec(vpc *sdn.VPC) field.ErrorList {
 	var errs field.ErrorList
 	cidrsPath := field.NewPath("spec", "cidrs")
 
-	if len(vpc.Spec.CIDRs) == 0 {
-		errs = append(errs, field.Required(cidrsPath,
-			"a VPC needs at least one CIDR; pods cannot attach to a VPC with no address space"))
-	}
-	for i, c := range vpc.Spec.CIDRs {
-		p := cidrsPath.Index(i)
-		ip, ipnet, err := net.ParseCIDR(c)
-		if err != nil {
-			errs = append(errs, field.Invalid(p, c, "not a valid CIDR"))
-			continue
-		}
-		// Canonical (masked) form, like the Port and ServiceVIP name claims:
-		// "10.0.0.5/24" means 10.0.0.0/24 to every consumer of this field, and a
-		// tenant reading its own spec back should not have to know that.
-		if !ip.Equal(ipnet.IP) || ipnet.String() != c {
-			errs = append(errs, field.Invalid(p, c,
-				"must be in canonical form (the network address and prefix, e.g. "+ipnet.String()+")"))
-		}
+	if err := sdnv1alpha1.ValidateVPCCIDRs(vpc.Spec.CIDRs); err != nil {
+		return field.ErrorList{field.Invalid(cidrsPath, nil, err.Error())}
 	}
 
+	if len(vpc.Spec.CIDRs) == 0 {
+		return field.ErrorList{field.Required(cidrsPath, "at least one network CIDR is required")}
+	}
+	for i, cidr := range vpc.Spec.CIDRs {
+		ip, prefix, _ := net.ParseCIDR(cidr)
+		if !ip.Equal(prefix.IP) {
+			return field.ErrorList{field.Invalid(cidrsPath.Index(i), nil, "must be a network CIDR without host bits")}
+		}
+	}
 	// The MTU is handed to the CNI verbatim; a nonsensical one produces a pod
 	// interface nothing can talk through. Zero means "take the default".
 	if m := vpc.Spec.MTU; m != 0 && (m < 576 || m > 65535) {

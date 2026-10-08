@@ -350,6 +350,12 @@ func TestTeardownOwnedPrunesAllLabelledBindingsOnly(t *testing.T) {
 		Name: "other-tenant-binding", Namespace: "tenant", // no vpnGatewayLabel at all
 	}}
 
+	gw.UID = "gateway-current"
+	controlled := true
+	for _, binding := range []*sdnv1alpha1.VPCBinding{primary, additional} {
+		binding.OwnerReferences = []metav1.OwnerReference{{APIVersion: sdnv1alpha1.SchemeGroupVersion.String(), Kind: "VPNGateway", Name: gw.Name, UID: gw.UID, Controller: &controlled}}
+	}
+
 	scheme := gatewayScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(primary, additional, unrelated).Build()
 	r := &VPNGatewayReconciler{Client: c, Scheme: scheme}

@@ -1,6 +1,7 @@
 package vpngateway
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
@@ -166,6 +167,63 @@ func TestValidateVPNGatewayAdditionalVPCRefs(t *testing.T) {
 				if !found {
 					t.Fatalf("expected a Forbidden error on spec.additionalVPCRefs, got %v", errs)
 				}
+			}
+		})
+	}
+}
+
+func TestVPNGatewayRejectsOversizedPoolCollection(t *testing.T) {
+	gw := poolBudgetFixture(129)
+	if errs := validateVPNGateway(gw); len(errs) == 0 {
+		t.Fatal("129 address pools accepted")
+	}
+	gw = poolBudgetFixture(128)
+	gw.Spec.IPsec.AddressPools[0].DNS = make([]string, 16)
+	for i := range gw.Spec.IPsec.AddressPools[0].DNS {
+		gw.Spec.IPsec.AddressPools[0].DNS[i] = "10.0.0.53"
+	}
+	if errs := validateVPNGateway(gw); len(errs) != 0 {
+		t.Fatalf("valid exact pool/DNS capacity refused: %v", errs)
+	}
+}
+
+func TestVPNGatewayRejectsOversizedDNSAndBGPCollections(t *testing.T) {
+	gw := poolBudgetFixture(1)
+	gw.Spec.IPsec.AddressPools[0].DNS = make([]string, 17)
+	for i := range gw.Spec.IPsec.AddressPools[0].DNS {
+		gw.Spec.IPsec.AddressPools[0].DNS[i] = "10.0.0.53"
+	}
+	if errs := validateVPNGateway(gw); len(errs) == 0 {
+		t.Fatal("17 pool DNS servers accepted")
+	}
+	gw = &sdn.VPNGateway{Spec: sdn.VPNGatewaySpec{VPCRef: sdn.LocalVPCRef{Name: "net"}, WireGuard: &sdn.VPNGatewayWireGuard{}, HA: &sdn.VPNGatewayHA{Mode: sdn.VPNGatewayHAModeActiveActive, ActiveActive: &sdn.VPNGatewayActiveActive{LocalASN: 64520, PeerASN: 64521, PeerAddresses: make([]string, 65)}}}}
+	for i := range gw.Spec.HA.ActiveActive.PeerAddresses {
+		gw.Spec.HA.ActiveActive.PeerAddresses[i] = "10.250.0.1"
+	}
+	if errs := validateVPNGateway(gw); len(errs) == 0 {
+		t.Fatal("65 BGP neighbors accepted")
+	}
+	gw.Spec.HA.ActiveActive.PeerAddresses = gw.Spec.HA.ActiveActive.PeerAddresses[:64]
+	if errs := validateVPNGateway(gw); len(errs) != 0 {
+		t.Fatalf("valid exact BGP capacity refused: %v", errs)
+	}
+}
+
+func poolBudgetFixture(n int) *sdn.VPNGateway {
+	gw := &sdn.VPNGateway{Spec: sdn.VPNGatewaySpec{VPCRef: sdn.LocalVPCRef{Name: "net"}, IPsec: &sdn.VPNGatewayIPsec{CredentialSecretRef: "gateway-tls"}}}
+	for i := range n {
+		gw.Spec.IPsec.AddressPools = append(gw.Spec.IPsec.AddressPools, sdn.VPNIPsecAddressPool{Name: fmt.Sprintf("pool-%d", i), CIDR: fmt.Sprintf("10.%d.%d.0/24", i/256, i%256)})
+	}
+	return gw
+}
+
+func BenchmarkVPNGatewayPoolValidation(b *testing.B) {
+	for _, n := range []int{128, 4096} {
+		b.Run(fmt.Sprintf("pools-%d", n), func(b *testing.B) {
+			gw := poolBudgetFixture(n)
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = validateVPNGateway(gw)
 			}
 		})
 	}

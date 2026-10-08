@@ -148,6 +148,9 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
   # Severed-gateway heal: recreate a Ready gateway pod whose .1 Port is gone.
   # watch: the persistent-Port controller watches virt-launcher pods to drive
   # live-migration cutover (kubevirt.io/nodeName) and GC.
@@ -316,3 +319,27 @@ spec:
             initialDelaySeconds: 10
           readinessProbe:
             httpGet: { path: /readyz, port: 8081 }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cozyplane-controller-leader
+  namespace: kube-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cozyplane-controller-leader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cozyplane-controller-leader
+subjects:
+  - kind: ServiceAccount
+    name: cozyplane-controller
+    namespace: {{ .Release.Namespace }}

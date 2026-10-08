@@ -81,8 +81,12 @@ vpn:
   # net.ipv6.conf.all.forwarding as pod sysctls. Drops privileged mode and keeps
   # only NET_ADMIN, NET_RAW and NET_BIND_SERVICE.
   hardenedAppliance: false
+  # Prometheus-compatible VPN metrics are exposed by every tunnel appliance on
+  # its named vpn-metrics port. Resources below are rendered only when their
+  # respective operator CRDs are installed in the cluster.
   observability:
     podScrape:
+      # Keep appliance discovery on by default when VictoriaMetrics is present.
       enabled: true
       interval: 30s
     rules:
@@ -95,6 +99,21 @@ vpn:
       enabled: true
       # Empty matches every Grafana instance visible to the operator.
       instanceSelector: {}
+
+# Observability (docs/observability.md). ALL OFF BY DEFAULT, matching
+# Cozystack's own posture (its Hubble ships disabled by default). Turn on only
+# what you want; each part is independent.
+observability:
+  # Per-flow events with verdicts and drop reasons: the flow_events ring buffer
+  # + flow_seen LRU in the datapath, the raw /flows loopback endpoint (read via
+  # cozyplane-flowctl), and the cozyplane_flow_* / cozyplane_flows_total series
+  # on each agent's :9411/metrics. Enabling adds ~14MiB of map memlock per node
+  # (visible in cozyplane_bpf_map_memlock_bytes).
+  flows: false
+  # DNS metrics from the split-horizon resolver: cozyplane_dns_{queries,
+  # responses}_total on the responder's :9413/metrics. Cheap (no datapath), but
+  # off by default so the node exposes no extra port unless asked.
+  dnsMetrics: false
 
 agent:
   # Bind address for the per-VPC Prometheus metrics (/metrics). The kubelet

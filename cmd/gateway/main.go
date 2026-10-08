@@ -46,7 +46,7 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 
-	"github.com/lllamnyp/cozyplane/datapath"
+	"github.com/lllamnyp/cozyplane/internal/vpnnet"
 )
 
 func main() {
@@ -71,13 +71,10 @@ func main() {
 }
 
 func run(vpcIface, fabricIface, clusterDNS string, internalCIDRs []string, log *slog.Logger) error {
-	// The CNI sets these up at gateway-attach; re-assert in case the netns was
-	// recycled (privileged container, own netns only).
-	if err := datapath.WriteProcSys("net/ipv4/ip_forward", "1"); err != nil {
-		return fmt.Errorf("enable ip_forward: %w", err)
-	}
-	if err := datapath.WriteProcSys("net/ipv6/conf/all/forwarding", "1"); err != nil {
-		return fmt.Errorf("enable ipv6 forwarding: %w", err)
+	// CNI already enables forwarding before the container starts. Read first
+	// so the capability-bounded container needs no writable /proc/sys mount.
+	if err := vpnnet.EnsureDualStackForwarding(); err != nil {
+		return err
 	}
 
 	// The same policy in both families, each table seeing only its own

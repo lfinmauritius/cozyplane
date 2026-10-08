@@ -74,6 +74,9 @@ const (
 	// service's VIP is found by label selection.
 	LabelServiceNamespace = "sdn.cozystack.io/service-namespace"
 	LabelServiceName      = "sdn.cozystack.io/service-name"
+	// Materialized VIPs belong to these generations, never to a reused name.
+	AnnotationServiceUID = "sdn.cozystack.io/service-uid"
+	AnnotationVPCUID     = "sdn.cozystack.io/vpc-uid"
 
 	// LabelPodNamespace is the attached pod's namespace (the consumer side).
 	LabelPodNamespace = "sdn.cozystack.io/pod-namespace"
@@ -88,6 +91,9 @@ const (
 	// membership (Port.status.groups) — membership is claim-time, so the copy
 	// need not track later pod-label edits in v1. JSON-encoded map[string]string.
 	AnnotationPodLabels = "sdn.cozystack.io/pod-labels"
+	// Sandbox ownership protects a live Port from an out-of-order CNI DEL.
+	AnnotationContainerID = "sdn.cozystack.io/container-id"
+	AnnotationCNIIfName   = "sdn.cozystack.io/cni-ifname"
 
 	// LabelVMName marks a *persistent* Port and records the VM identity it is
 	// pinned to (the KubeVirt VM name, within LabelPodNamespace). A virt-launcher
@@ -135,3 +141,6 @@ const (
 	// the Port's node no longer exists.
 	FinalizerSever = "sdn.cozystack.io/sever"
 )
+
+// AnnotationCNIPrimary marks the attachment used by the sandbox's fabric bridge.
+const AnnotationCNIPrimary = "sdn.cozystack.io/cni-primary"

@@ -28,6 +28,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/lllamnyp/cozyplane/internal/httpserver"
 	"log/slog"
 	"net"
 	"net/http"
@@ -41,6 +42,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/lllamnyp/cozyplane/internal/vpnlimits"
 	"github.com/lllamnyp/cozyplane/internal/vpnnet"
 	"github.com/lllamnyp/cozyplane/internal/vpnstatus"
 )
@@ -92,6 +94,10 @@ func run(path string, log *slog.Logger) error {
 	privateKey, err := selectPrivateKey(cfg, os.Getenv("POD_NAME"))
 	if err != nil {
 		return err
+	}
+	privateKey, valid := vpnlimits.WireGuardSecretKey(privateKey)
+	if !valid {
+		return fmt.Errorf("private key has an invalid encoding")
 	}
 	priv, err := wgtypes.ParseKey(privateKey)
 	if err != nil {
@@ -298,13 +304,7 @@ func serveMetrics(wg *wgctrl.Client, names map[wgtypes.Key]string, log *slog.Log
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	srv := &http.Server{
-		Addr:              metricsAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       30 * time.Second, // reap idle keep-alives; a misbehaving scraper can't pile up connections
-	}
+	srv := httpserver.New(metricsAddr, mux)
 	if err := srv.ListenAndServe(); err != nil {
 		log.Error("metrics server stopped", "err", err)
 	}
@@ -353,12 +353,28 @@ func buildPeers(in []peer) ([]wgtypes.PeerConfig, []*net.IPNet, error) {
 	var out []wgtypes.PeerConfig
 	var routes []*net.IPNet
 	for i, p := range in {
+		if problem := vpnlimits.WireGuardPeerProblem(vpnlimits.WireGuardPeer{PublicKey: p.PublicKey, Endpoint: p.Endpoint, Keepalive: int64(p.Keepalive)}); problem != "" {
+			return nil, nil, fmt.Errorf("peer %d: %s", i, problem)
+		}
+		if p.PresharedKey != "" {
+			var valid bool
+			p.PresharedKey, valid = vpnlimits.WireGuardSecretKey(p.PresharedKey)
+			if !valid {
+				return nil, nil, fmt.Errorf("peer %d preshared key has an invalid encoding", i)
+			}
+		}
+		if len(p.AllowedIPs) > vpnlimits.RoutePrefixes-len(routes) {
+			return nil, nil, fmt.Errorf("WireGuard allowed prefixes exceed %d", vpnlimits.RoutePrefixes)
+		}
 		pub, err := wgtypes.ParseKey(p.PublicKey)
 		if err != nil {
 			return nil, nil, fmt.Errorf("peer %d public key: %w", i, err)
 		}
 		pc := wgtypes.PeerConfig{PublicKey: pub, ReplaceAllowedIPs: true}
 		for _, cidr := range p.AllowedIPs {
+			if len(cidr) > 64 {
+				return nil, nil, fmt.Errorf("peer %d allowed prefix exceeds 64 bytes", i)
+			}
 			_, ipnet, err := net.ParseCIDR(cidr)
 			if err != nil {
 				return nil, nil, fmt.Errorf("peer %d allowedIP %q: %w", i, cidr, err)

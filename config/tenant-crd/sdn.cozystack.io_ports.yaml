@@ -132,15 +132,41 @@ spec:
           status:
             description: PortStatus is the controller-observed state of a Port.
             properties:
+              groupPodUID:
+                description: GroupPodUID identifies the pod whose labels resolved
+                  this membership.
+                type: string
+              groupRefs:
+                description: GroupRefs proves the current SecurityGroup UID behind
+                  each allocated ID.
+                items:
+                  description: |-
+                    SecurityGroupMembership prevents a recycled numeric ID from granting the
+                    permissions of a replacement group to predecessor Ports.
+                  properties:
+                    id:
+                      format: int32
+                      type: integer
+                    uid:
+                      description: |-
+                        UID is a type that holds unique ID values, including UUIDs.  Because we
+                        don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                        intent and helps make sure that UIDs and names do not get conflated.
+                      type: string
+                  required:
+                  - id
+                  - uid
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               groups:
                 description: |-
                   Groups is the set of SecurityGroup numeric ids (1..62, within the Port's
                   VPC) this Port is a member of, resolved by the controller from the pod's
                   labels. The agent folds it into the datapath membership bitmap. Empty
                   means "no groups" — legacy allow-all intra-VPC ingress.
-                  [0] alone means a selected SG is pending/invalid: deny new SG-gated
-                  TCP/UDP admissions until all selected group IDs are resolved. It is not
-                  full protocol quarantine. All agents must support this before activation.
+                  Zero denotes a selected group awaiting allocation: default-deny without
+                  granting rules. Resolved groups still union their permissions normally.
                 items:
                   format: int32
                   type: integer

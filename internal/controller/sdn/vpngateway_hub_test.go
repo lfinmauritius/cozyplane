@@ -385,6 +385,10 @@ func TestEnsureBindingsPrunesStale(t *testing.T) {
 		Namespace: "tenant",
 		Labels:    map[string]string{vpnGatewayLabel: "gateway"},
 	}}
+	gw.UID = "gateway-current"
+	controlled := true
+	stale.OwnerReferences = []metav1.OwnerReference{{APIVersion: sdnv1alpha1.SchemeGroupVersion.String(), Kind: "VPNGateway", Name: gw.Name, UID: gw.UID, Controller: &controlled}}
+
 	scheme := testScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stale).Build()
 	r := &VPNGatewayReconciler{Client: c, Scheme: scheme}

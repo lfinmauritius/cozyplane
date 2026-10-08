@@ -21,6 +21,7 @@ import (
 	"errors"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
+	"github.com/lllamnyp/cozyplane/internal/vpnlimits"
 	"github.com/lllamnyp/cozyplane/pkg/registry/sdn/authz"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -111,14 +112,17 @@ func (s vpcPeeringStrategy) Validate(ctx context.Context, obj runtime.Object) fi
 	peering := obj.(*sdn.VPCPeering)
 	var errs field.ErrorList
 	specPath := field.NewPath("spec")
-	if peering.Spec.VPCRef.Name == "" {
-		errs = append(errs, field.Required(specPath.Child("vpcRef", "name"), "the local VPC name is required"))
+	if errs := vpnlimits.ReferenceErrors(peering.Spec.VPCRef.Name, specPath.Child("vpcRef", "name"), true); len(errs) != 0 {
+		return errs
 	}
 	if peering.Spec.PeerRef.Namespace == "" {
-		errs = append(errs, field.Required(specPath.Child("peerRef", "namespace"), "the peer VPC namespace is required"))
+		return field.ErrorList{field.Required(specPath.Child("peerRef", "namespace"), "the peer VPC namespace is required")}
 	}
-	if peering.Spec.PeerRef.Name == "" {
-		errs = append(errs, field.Required(specPath.Child("peerRef", "name"), "the peer VPC name is required"))
+	if errs := vpnlimits.NamespaceReferenceErrors(peering.Spec.PeerRef.Namespace, specPath.Child("peerRef", "namespace")); len(errs) != 0 {
+		return errs
+	}
+	if errs := vpnlimits.ReferenceErrors(peering.Spec.PeerRef.Name, specPath.Child("peerRef", "name"), true); len(errs) != 0 {
+		return errs
 	}
 	if peering.Spec.PeerRef.Namespace == peering.Namespace && peering.Spec.PeerRef.Name == peering.Spec.VPCRef.Name {
 		errs = append(errs, field.Invalid(specPath.Child("peerRef"), peering.Spec.PeerRef,

@@ -18,6 +18,7 @@ package sdn
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // VPCPhase is the lifecycle phase of a VPC.
@@ -167,9 +168,10 @@ type VPCGatewayStatus struct {
 
 // VPCGatewayRouteStatus reports one resolved route.
 type VPCGatewayRouteStatus struct {
-	CIDRs []string
-	Port  string
-	Ports []string
+	VPCRef LocalVPCRef
+	CIDRs  []string
+	Port   string
+	Ports  []string
 }
 
 // VPCGatewayAppliance selects the tenant workload that serves as the VPC's door.
@@ -360,12 +362,13 @@ type VPNConnectionIPsecAuth struct {
 
 // VPNConnectionIPsec configures an IKEv2 peer.
 type VPNConnectionIPsec struct {
-	PeerAddress string
-	Auth        VPNConnectionIPsecAuth
-	Proposals   []string
-	DPDDelay    int32
-	StartAction VPNIPsecStartAction
-	AddressPool string
+	RemoteIdentity string
+	PeerAddress    string
+	Auth           VPNConnectionIPsecAuth
+	Proposals      []string
+	DPDDelay       int32
+	StartAction    VPNIPsecStartAction
+	AddressPool    string
 }
 
 // VPNConnectionSpec declares one tunnel to a remote site (issue #6).
@@ -586,7 +589,14 @@ type PortStatus struct {
 	// Groups is the set of SecurityGroup numeric ids this Port belongs to
 	// (resolved from the pod's labels), folded into the datapath membership
 	// bitmap by the agent. Empty means "no groups" (legacy allow).
-	Groups []int32
+	Groups      []int32
+	GroupRefs   []SecurityGroupMembership
+	GroupPodUID types.UID
+}
+
+type SecurityGroupMembership struct {
+	ID  int32
+	UID types.UID
 }
 
 // +genclient

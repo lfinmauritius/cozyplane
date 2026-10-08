@@ -26,8 +26,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/vishvananda/netlink"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
 	"github.com/lllamnyp/cozyplane/datapath"
 )
 
@@ -74,12 +74,9 @@ func addDelegate(ctx context.Context, args *skel.CmdArgs, conf *NetConf,
 	if err != nil {
 		return err
 	}
-	vpc, err := client.SdnV1alpha1().VPCs(a.VPCNamespace).Get(ctx, a.VPCName, metav1.GetOptions{})
+	vpc, err := lookupAttachmentVPC(ctx, client, a.VPCNamespace, a.VPCName)
 	if err != nil {
-		return fmt.Errorf("get vpc %s/%s: %w", a.VPCNamespace, a.VPCName, err)
-	}
-	if !netid.ValidVNI(vpc.Status.VNI) {
-		return fmt.Errorf("vpc %s/%s is not ready (no VNI assigned yet)", a.VPCNamespace, a.VPCName)
+		return err
 	}
 	if len(vpc.Spec.CIDRs) == 0 {
 		return fmt.Errorf("vpc %s/%s has no CIDR", a.VPCNamespace, a.VPCName)
@@ -88,7 +85,7 @@ func addDelegate(ctx context.Context, args *skel.CmdArgs, conf *NetConf,
 	if err != nil {
 		return fmt.Errorf("vpc %s/%s CIDR: %w", a.VPCNamespace, a.VPCName, err)
 	}
-	r := resolvedAttachment{attachment: a, vpc: vpc, cidr: cidr, forwarding: forwarding, forwardingCIDRs: fwdCIDRs}
+	r := resolvedAttachment{attachment: a, vpc: vpc, cidr: cidr, forwarding: forwarding, forwardingCIDRs: fwdCIDRs, containerID: args.ContainerID, cniIfName: args.IfName}
 
 	hostVeth, err := hostVethNameForDelegate(args.ContainerID, args.IfName)
 	if err != nil {
@@ -105,9 +102,13 @@ func addDelegate(ctx context.Context, args *skel.CmdArgs, conf *NetConf,
 		if err != nil && !bound {
 			cctx, ccancel := cleanupContext(ctx)
 			defer ccancel()
-			_ = client.SdnV1alpha1().Ports().Delete(cctx, port.Name, metav1.DeleteOptions{})
+			_ = deleteClaimedPort(cctx, client, port)
 		}
 	}()
+	if err = recordPortSandbox(ctx, client, port, args.ContainerID, args.IfName, r.Primary(), state.NodeName); err != nil {
+		return err
+	}
+	r.portIdentity = datapath.PortVethIdentity{UID: string(port.UID), Staged: bound && port.Spec.Node != "" && port.Spec.Node != state.NodeName}
 
 	mtu := conf.MTU
 	if mtu == 0 {
@@ -127,16 +128,6 @@ func addDelegate(ctx context.Context, args *skel.CmdArgs, conf *NetConf,
 	podMAC, err := setupAttachment(args, r, hostVeth, vpcIP, pinnedMAC, mtu, netID)
 	if err != nil {
 		return err
-	}
-
-	// Staged locals (live-migration overlap window), same rule as the annotation
-	// path: while the VM is still ACTIVE elsewhere, local delivery must keep
-	// following the active location or a co-located client lands in the
-	// not-yet-running VM.
-	if bound && port.Spec.Node != "" && port.Spec.Node != state.NodeName {
-		if err = datapath.DelLocal(netid.VNI(vpc.Status.VNI), vpcIP); err != nil {
-			return err
-		}
 	}
 
 	// A delegate reports its OWN interface and address — Multus checks the name
@@ -170,7 +161,13 @@ func delDelegate(ctx context.Context, args *skel.CmdArgs, conf *NetConf) error {
 		return nil
 	}
 
+	ownIfindices := map[int]bool{}
 	if hv, e := netlink.LinkByName(hostVeth); e == nil {
+		containerID, ifName := datapath.VethSandbox(hv.Attrs().Alias)
+		if containerID != "" && (containerID != args.ContainerID || ifName != args.IfName) {
+			return nil
+		}
+		ownIfindices[hv.Attrs().Index] = true
 		_ = datapath.DelPortNet(hv.Attrs().Index)
 		_ = datapath.DetachVeth(hv.Attrs().Index)
 		// Delete the pair, unlike the annotation path — there, the links go with
@@ -199,22 +196,9 @@ func delDelegate(ctx context.Context, args *skel.CmdArgs, conf *NetConf) error {
 		selector = labelPodUID + "=" + podUID
 	}
 	selector += "," + labelIfName + "=" + args.IfName
-	list, e := client.SdnV1alpha1().Ports().List(ctx, metav1.ListOptions{LabelSelector: selector})
-	if e != nil {
-		return nil
-	}
-	for i := range list.Items {
-		p := &list.Items[i]
-		if net_, ok := netFromPortName(p.Name); ok {
-			_ = datapath.DelLocal(net_, net.ParseIP(p.Spec.IP))
+	return releaseSandboxPorts(ctx, client, selector, args.ContainerID, args.IfName, func(p *sdnv1alpha1.Port) {
+		if netID, ok := netFromPortName(p.Name); ok {
+			delSandboxLocal(netID, net.ParseIP(p.Spec.IP), ownIfindices)
 		}
-		// A persistent (VM NIC) Port outlives its pod so the VPC IP + MAC survive
-		// pod churn and live migration; the persistent-Port controller GCs it
-		// once the VM is gone.
-		if p.Labels[labelVMName] != "" {
-			continue
-		}
-		_ = client.SdnV1alpha1().Ports().Delete(ctx, p.Name, metav1.DeleteOptions{})
-	}
-	return nil
+	})
 }

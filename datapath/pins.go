@@ -58,6 +58,9 @@ func reconcilePins() ([]string, error) {
 				continue
 			}
 		}
+		if name == "hf_modes" {
+			return removed, fmt.Errorf("refuse removal of incompatible durable host-firewall modes")
+		}
 		if err := os.Remove(path); err != nil {
 			return removed, fmt.Errorf("remove incompatible pin %s: %w", name, err)
 		}

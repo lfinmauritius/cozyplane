@@ -29,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/lllamnyp/cozyplane/api/sdn"
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
 )
 
@@ -42,20 +43,23 @@ func applianceGateway(ns, name, vpcName string, sel map[string]string) *sdnv1alp
 }
 
 func appliancePod(ns, name string, labels map[string]string) *corev1.Pod {
-	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels}}
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID("pod-" + name), Labels: labels}}
 }
 
 // vpcPort is the Port the CNI made when the workload attached to the VPC.
 func vpcPort(name, vpcNS, vpcName, podNS, podName string, gateway bool) *sdnv1alpha1.Port {
+	_, escapedIP, _ := sdn.ParseClaim(sdn.ClaimPrefixPort, name)
 	return &sdnv1alpha1.Port{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
 				sdnv1alpha1.LabelVPCNamespace: vpcNS,
 				sdnv1alpha1.LabelVPC:          vpcName,
+				sdnv1alpha1.LabelPodUID:       "pod-" + podName,
 			},
 		},
 		Spec: sdnv1alpha1.PortSpec{
+			IP:           strings.ReplaceAll(escapedIP, "-", "."),
 			VPCRef:       sdnv1alpha1.VPCRef{Namespace: vpcNS, Name: vpcName},
 			PodNamespace: podNS,
 			PodName:      podName,

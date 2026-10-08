@@ -133,7 +133,7 @@ func TestCNIConfOwner(t *testing.T) {
 					t.Fatalf("seed %s: %v", f, err)
 				}
 			}
-			if got := cniConfOwner(dir, c.ours); got != c.want {
+			if got, err := cniConfOwner(dir, c.ours); err != nil || got != c.want {
 				t.Errorf("cniConfOwner = %q, want %q", got, c.want)
 			}
 		})
@@ -145,7 +145,7 @@ func TestCNIConfOwner(t *testing.T) {
 // alone — the ordinary case.
 func TestCNIConfOwnerMissingDir(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	if got := cniConfOwner(missing, "10-cozyplane.conflist"); got != "" {
+	if got, err := cniConfOwner(missing, "10-cozyplane.conflist"); err != nil || got != "" {
 		t.Errorf("cniConfOwner = %q on a missing directory, want empty", got)
 	}
 }

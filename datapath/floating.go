@@ -415,11 +415,81 @@ func (m *Manager) SetFloating(publicIP, vpcIP string, net_ uint32) error {
 	if err != nil {
 		return fmt.Errorf("vpc IP: %w", err)
 	}
+	var previous overlayBridgeEp
+	lookupErr := m.objs.Floating.Lookup(&pub, &previous)
+	if lookupErr != nil && !isNotExist(lookupErr) {
+		return fmt.Errorf("read previous floating %s: %w", publicIP, lookupErr)
+	}
+	// Withdraw the predecessor before publishing the replacement, also freeing
+	// its reverse slot so a same-address retarget succeeds at map capacity.
+	if lookupErr == nil && (previous.Net != net_ || previous.VpcIp != vpc) {
+		if err := m.delFloatingEgressOwned(overlayLocalKey{Net: previous.Net, Ip: previous.VpcIp}, pub); err != nil {
+			return err
+		}
+	}
 	if err := m.objs.Floating.Put(&pub, &overlayBridgeEp{Net: net_, VpcIp: vpc}); err != nil {
 		return fmt.Errorf("set floating %s: %w", publicIP, err)
 	}
 	if err := m.objs.FloatingEgress.Put(&overlayLocalKey{Net: net_, Ip: vpc}, &pub); err != nil {
 		return fmt.Errorf("set floating egress %s: %w", publicIP, err)
+	}
+	return nil
+}
+
+func (m *Manager) delFloatingEgressOwned(key overlayLocalKey, pub overlayAddr128) error {
+	var current overlayAddr128
+	if err := m.objs.FloatingEgress.Lookup(key, &current); err != nil {
+		if isNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if current == pub {
+		if err := m.objs.FloatingEgress.Delete(key); err != nil && !isNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// FloatingTarget identifies a tenant leg in a complete floating projection.
+type FloatingTarget struct {
+	VNI   uint32
+	VPCIP string
+}
+
+// SyncFloating preflights and reconciles both map directions, pruning orphan
+// SNAT entries that can no longer be discovered from the forward map alone.
+func (m *Manager) SyncFloating(targets map[string]FloatingTarget) error {
+	forward := map[overlayAddr128]overlayBridgeEp{}
+	reverse := map[overlayLocalKey]overlayAddr128{}
+	for public, target := range targets {
+		pubIP, vpcIP := net.ParseIP(public), net.ParseIP(target.VPCIP)
+		if pubIP == nil || vpcIP == nil || (pubIP.To4() != nil) != (vpcIP.To4() != nil) || target.VNI == 0 {
+			return fmt.Errorf("invalid floating identity %q -> VNI %d address %q", public, target.VNI, target.VPCIP)
+		}
+		pub, _ := addr128(pubIP)
+		vpc, _ := addr128(vpcIP)
+		ep := overlayBridgeEp{Net: target.VNI, VpcIp: vpc}
+		key := overlayLocalKey{Net: target.VNI, Ip: vpc}
+		if old, ok := forward[pub]; ok && old != ep {
+			return fmt.Errorf("floating address %s has multiple targets", public)
+		}
+		if old, ok := reverse[key]; ok && old != pub {
+			return fmt.Errorf("floating target has multiple public addresses")
+		}
+		if err := putDesired(m.objs.Floating, forward, pub, ep); err != nil {
+			return err
+		}
+		if err := putDesired(m.objs.FloatingEgress, reverse, key, pub); err != nil {
+			return err
+		}
+	}
+	if err := syncMap(m.objs.FloatingEgress, reverse); err != nil {
+		return fmt.Errorf("sync floating egress: %w", err)
+	}
+	if err := syncMap(m.objs.Floating, forward); err != nil {
+		return fmt.Errorf("sync floating ingress: %w", err)
 	}
 	return nil
 }
@@ -441,9 +511,8 @@ func (m *Manager) DelFloating(publicIP string) error {
 	var ep overlayBridgeEp
 	if err := m.objs.Floating.Lookup(&pub, &ep); err == nil {
 		key := overlayLocalKey{Net: ep.Net, Ip: ep.VpcIp}
-		var cur overlayAddr128
-		if err := m.objs.FloatingEgress.Lookup(&key, &cur); err == nil && cur == pub {
-			_ = m.objs.FloatingEgress.Delete(&key)
+		if err := m.delFloatingEgressOwned(key, pub); err != nil {
+			return err
 		}
 	}
 	if err := m.objs.Floating.Delete(&pub); err != nil && !isNotExist(err) {

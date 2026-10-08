@@ -94,14 +94,11 @@ jobs:
           b=$(helm show values chart/cozyplane-apiserver | yq '.image')
           [ "$a" = "$b" ] || { echo "pin drift: $a != $b" >&2; exit 1; }
 
-  # The compiled eBPF object (datapath/overlay_bpfel.*) is committed and embedded
-  # via go:embed. Regenerate it from the runner's kernel BTF and flag drift. The
-  # exact object bytes are clang-version sensitive, so this is informational
-  # (non-blocking): what it reliably guards is the generated Go bindings
-  # (map/struct layout), which must match bpf/overlay.c.
+  # Regenerate the committed eBPF object and load every tc entry point through
+  # the kernel verifier. Exact object bytes remain clang-version sensitive, but
+  # compilation and verifier acceptance are release-blocking.
   ebpf:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -126,6 +123,12 @@ jobs:
           bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
       - name: go generate ./datapath
         run: go generate ./datapath
+      - name: kernel verifier
+        run: |
+          pin=/sys/fs/bpf/cozyplane-ci-${GITHUB_RUN_ID}
+          case "$pin" in /sys/fs/bpf/cozyplane-ci-*) ;; *) exit 2 ;; esac
+          trap 'sudo rm -rf -- "$pin"' EXIT
+          sudo bpftool prog loadall datapath/overlay_bpfel.o "$pin" type classifier
       - name: flag bindings drift
         run: |
           if ! git diff --exit-code datapath/overlay_bpfel.go; then

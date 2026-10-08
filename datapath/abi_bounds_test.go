@@ -49,7 +49,7 @@ func TestMalformedPolicyCIDRRejectedBeforeMapAccess(t *testing.T) {
 		}
 	}()
 	m := &Manager{}
-	for _, err := range []error{m.SyncSGCidr([]SGCidr{{CIDR: bad}}), m.SyncSGEgressCidr([]SGEgressCidr{{CIDR: bad}}), m.SyncNPCidrs([]NPCidr{{CIDR: bad}}), m.SyncHFAllows([]HFAllow{{CIDR: bad}})} {
+	for _, err := range []error{m.SyncSGCidr([]SGCidr{{CIDR: bad}}), m.SyncSGEgressCidr([]SGEgressCidr{{CIDR: bad}}), m.SyncNPCidrs([]NPCidr{{CIDR: bad}}), m.syncHFRules(nil, []HFAllow{{CIDR: bad}})} {
 		if err == nil {
 			t.Error("noncontiguous mask accepted")
 		}

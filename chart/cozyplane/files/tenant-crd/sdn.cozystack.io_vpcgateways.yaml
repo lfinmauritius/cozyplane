@@ -422,6 +422,18 @@ spec:
                         type: string
                       type: array
                       x-kubernetes-list-type: atomic
+                    vpcRef:
+                      description: |-
+                        VPCRef scopes a VPN route to a declared same-namespace served VPC.
+                        Empty means the parent gateway's primary VPC. VPCGateway ignores it.
+                      properties:
+                        name:
+                          description: Name is the VPC name within the referring object's
+                            namespace.
+                          type: string
+                      required:
+                      - name
+                      type: object
                   required:
                   - cidrs
                   type: object

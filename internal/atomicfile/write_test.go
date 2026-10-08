@@ -56,3 +56,18 @@ func TestWriteDoesNotFollowPredictableTemporarySymlink(t *testing.T) {
 		t.Fatalf("temporary files leaked %v %v", files, err)
 	}
 }
+
+func TestFailedRenameRemovesTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "existing-directory")
+	if err := os.Mkdir(dst, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(dst, []byte("synthetic")); err == nil {
+		t.Fatal("directory replacement unexpectedly succeeded")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "existing-directory" {
+		t.Fatal("failed publication leaked a temporary file", entries, err)
+	}
+}

@@ -19,30 +19,42 @@ package sdn
 import (
 	"context"
 	"fmt"
+	"github.com/lllamnyp/cozyplane/pkg/boundaryidentity"
 	"github.com/lllamnyp/cozyplane/pkg/netid"
-	"slices"
-	"time"
-
-	"k8s.io/apimachinery/pkg/api/equality"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/types"
+	"slices"
+	"strconv"
+	"time"
+
+	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/lllamnyp/cozyplane/api/sdn"
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
-	"github.com/lllamnyp/cozyplane/pkg/boundaryidentity"
+	"github.com/lllamnyp/cozyplane/internal/ipam"
 )
 
 // firstVNI is the lowest network id handed out to VPCs. Ids below it are
 // reserved (0 is the default/system network).
 const firstVNI int32 = netid.FirstVNI
+
+const (
+	lastVNI              int32 = 1<<22 - 1 // upper Geneve bits encode forwarding/gateway flags
+	vniCounterNamespace        = "kube-system"
+	vniCounterName             = "cozyplane-vni-allocator"
+	vniCounterAnnotation       = "sdn.cozystack.io/last-vni"
+	vniOperationTimeout        = 30 * time.Second
+)
 
 // VPCReconciler assigns each VPC a unique network id (VNI) and marks it Ready.
 // The datapath (agent) keys isolation and the overlay on this id.
@@ -78,6 +90,7 @@ func (r *VPCReconciler) reader() client.Reader {
 
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpcs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpcs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;create;update
 
 // Reconcile assigns a VNI to the VPC if it has none, then sets phase Ready.
 func (r *VPCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -89,6 +102,9 @@ func (r *VPCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetch VPC: %w", err)
+	}
+	if !vpc.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
 	}
 	previousStatus := vpc.DeepCopy().Status
 
@@ -148,6 +164,8 @@ func (r *VPCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 // Acknowledgements are tied to the actual operator DaemonSet's current Pods,
 // never to tenant-supplied labels or previous agent instances.
 func (r *VPCReconciler) boundaryApplied(ctx context.Context, vpc *sdnv1alpha1.VPC) (bool, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, vniOperationTimeout)
+	defer cancel()
 	if r.AgentNamespace == "" {
 		return false, false, nil
 	}
@@ -161,15 +179,19 @@ func (r *VPCReconciler) boundaryApplied(ctx context.Context, vpc *sdnv1alpha1.VP
 	if ds.Status.DesiredNumberScheduled < 1 {
 		return false, false, nil
 	}
-	var ports sdnv1alpha1.PortList
-	if err := r.reader().List(ctx, &ports); err != nil {
-		return false, false, err
-	}
 	identities := []boundaryidentity.PrimaryPort{}
-	for _, port := range ports.Items {
+	// Live pages keep the digest authoritative without copying every Port in
+	// the cluster into one response for every boundary acknowledgement.
+	if err := ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.Port, string, error) {
+		var ports sdnv1alpha1.PortList
+		err := r.reader().List(ctx, &ports, client.Limit(limit), client.Continue(token))
+		return ports.Items, ports.Continue, err
+	}, func(port *sdnv1alpha1.Port) {
 		if port.Spec.Primary && port.Spec.VPCRef == (sdnv1alpha1.VPCRef{Namespace: vpc.Namespace, Name: vpc.Name}) {
 			identities = append(identities, boundaryidentity.PrimaryPort{UID: string(port.UID), IP: port.Spec.IP})
 		}
+	}); err != nil {
+		return false, false, err
 	}
 	digest := boundaryidentity.Digest(identities)
 	selector, err := metav1.LabelSelectorAsSelector(ds.Spec.Selector)
@@ -215,25 +237,117 @@ func (r *VPCReconciler) boundaryApplied(ctx context.Context, vpc *sdnv1alpha1.VP
 	return policy, transport, nil
 }
 
-// allocateVNI returns the lowest VNI >= firstVNI not used by any other VPC.
-// The list is a live API read (see Reader) — never the informer cache.
+// allocateVNI durably reserves a never-reused identifier before status exposes
+// it. Failed status updates intentionally burn reservations rather than recycle.
 func (r *VPCReconciler) allocateVNI(ctx context.Context) (int32, error) {
-	var list sdnv1alpha1.VPCList
-	if err := r.reader().List(ctx, &list); err != nil {
-		return 0, fmt.Errorf("list VPCs: %w", err)
-	}
-	used := map[int32]bool{}
-	for i := range list.Items {
-		if v := list.Items[i].Status.VNI; v != 0 {
-			used[v] = true
+	ctx, cancel := context.WithTimeout(ctx, vniOperationTimeout)
+	defer cancel()
+	var allocated int32
+	var attemptErr error
+	err := retry.OnError(retry.DefaultRetry, func(err error) bool {
+		return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err)
+	}, func() (err error) {
+		// client-go's retry helper can discard an interrupted attempt's error.
+		// Preserve its actual result independently of the helper's return value.
+		defer func() { attemptErr = err }()
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-	}
-	for vni := firstVNI; vni <= netid.LastVNI; vni++ {
-		if !used[vni] {
-			return vni, nil
+		counter := &coordinationv1.Lease{}
+		err = r.reader().Get(ctx, client.ObjectKey{Namespace: vniCounterNamespace, Name: vniCounterName}, counter)
+		if apierrors.IsNotFound(err) {
+			high, err := r.initialVNIHighWater(ctx)
+			if err != nil {
+				return err
+			}
+			if high >= lastVNI {
+				return fmt.Errorf("VNI range exhausted")
+			}
+			candidate := high + 1
+			counter.ObjectMeta = metav1.ObjectMeta{Namespace: vniCounterNamespace, Name: vniCounterName,
+				Annotations: map[string]string{vniCounterAnnotation: strconv.FormatInt(int64(candidate), 10)}}
+			if err := r.Create(ctx, counter); err != nil {
+				return err
+			}
+			allocated = candidate
+			return nil
 		}
+		if err != nil {
+			return fmt.Errorf("read durable VNI counter: %w", err)
+		}
+		if !counter.DeletionTimestamp.IsZero() {
+			return fmt.Errorf("durable VNI counter is being deleted")
+		}
+		high, err := strconv.ParseInt(counter.Annotations[vniCounterAnnotation], 10, 32)
+		if err != nil || high < int64(firstVNI-1) || high > int64(lastVNI) {
+			return fmt.Errorf("durable VNI counter is invalid")
+		}
+		if high == int64(lastVNI) {
+			return fmt.Errorf("VNI range exhausted")
+		}
+		candidate := int32(high) + 1
+		counter.Annotations[vniCounterAnnotation] = strconv.FormatInt(int64(candidate), 10)
+		if err := r.Update(ctx, counter); err != nil {
+			return err
+		}
+		allocated = candidate
+		return nil
+	})
+	if ctx.Err() != nil {
+		return 0, ctx.Err()
 	}
-	return 0, fmt.Errorf("tenant VNI space exhausted")
+	if attemptErr != nil {
+		return 0, attemptErr
+	}
+	if err != nil {
+		return 0, err
+	}
+	if allocated < firstVNI || allocated > lastVNI {
+		return 0, fmt.Errorf("VNI reservation completed without a confirmed counter write")
+	}
+	return allocated, nil
+}
+
+// Bootstrap only: live claims also retain a retired VPC's network identity.
+// Existing counters avoid scans proportional to all historical allocations.
+func (r *VPCReconciler) initialVNIHighWater(ctx context.Context) (int32, error) {
+	ctx, cancel := context.WithTimeout(ctx, vniOperationTimeout)
+	defer cancel()
+	high := firstVNI - 1
+	if err := ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.VPC, string, error) {
+		var list sdnv1alpha1.VPCList
+		err := r.reader().List(ctx, &list, client.Limit(limit), client.Continue(token))
+		return list.Items, list.Continue, err
+	}, func(vpc *sdnv1alpha1.VPC) {
+		if netid.ValidVNI(vpc.Status.VNI) {
+			high = max(high, vpc.Status.VNI)
+		}
+	}); err != nil {
+		return 0, fmt.Errorf("list VPC VNI claims: %w", err)
+	}
+	if err := ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.Port, string, error) {
+		var list sdnv1alpha1.PortList
+		err := r.reader().List(ctx, &list, client.Limit(limit), client.Continue(token))
+		return list.Items, list.Continue, err
+	}, func(port *sdnv1alpha1.Port) {
+		if vni, _, ok := sdn.ParseClaim(sdn.ClaimPrefixPort, port.Name); ok {
+			high = max(high, vni)
+		}
+	}); err != nil {
+		return 0, fmt.Errorf("list Port VNI claims: %w", err)
+	}
+	if err := ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.ServiceVIP, string, error) {
+		var list sdnv1alpha1.ServiceVIPList
+		err := r.reader().List(ctx, &list, client.Limit(limit), client.Continue(token))
+		return list.Items, list.Continue, err
+	}, func(vip *sdnv1alpha1.ServiceVIP) {
+		if vni, _, ok := sdn.ParseClaim(sdn.ClaimPrefixServiceVIP, vip.Name); ok {
+			high = max(high, vni)
+		}
+	}); err != nil {
+		return 0, fmt.Errorf("list ServiceVIP VNI claims: %w", err)
+	}
+	return high, nil
 }
 
 // lostVNIToDuplicate reports whether vpc shares its VNI with another VPC that
@@ -241,21 +355,26 @@ func (r *VPCReconciler) allocateVNI(ctx context.Context) (int32, error) {
 // namespace/name. Exactly one side of a duplicate pair yields, so repair
 // converges without the two reconciles fighting. Live read, like allocation.
 func (r *VPCReconciler) lostVNIToDuplicate(ctx context.Context, vpc *sdnv1alpha1.VPC) (bool, error) {
-	var list sdnv1alpha1.VPCList
-	if err := r.reader().List(ctx, &list); err != nil {
-		return false, fmt.Errorf("list VPCs: %w", err)
-	}
+	ctx, cancel := context.WithTimeout(ctx, vniOperationTimeout)
+	defer cancel()
 	self := vpcClaimKey(vpc)
-	for i := range list.Items {
-		o := &list.Items[i]
-		if vpcClaimKey(o).name == self.name || o.Status.VNI != vpc.Status.VNI {
-			continue
+	lost := false
+	err := ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.VPC, string, error) {
+		var list sdnv1alpha1.VPCList
+		err := r.reader().List(ctx, &list, client.Limit(limit), client.Continue(token))
+		return list.Items, list.Continue, err
+	}, func(o *sdnv1alpha1.VPC) {
+		if o.Status.VNI != vpc.Status.VNI || o.Namespace == vpc.Namespace && o.Name == vpc.Name {
+			return
 		}
 		if vpcClaimOlder(vpcClaimKey(o), self) {
-			return true, nil // the other VPC's claim wins; yield
+			lost = true
 		}
+	})
+	if err != nil {
+		return false, fmt.Errorf("list duplicate VPC VNI claims: %w", err)
 	}
-	return false, nil
+	return lost, nil
 }
 
 type vpcClaim struct {

@@ -38,7 +38,7 @@ func TestSecurityGroupExplicitPortsAreBounded(t *testing.T) {
 					} else {
 						sg.Spec.Egress = []sdn.SecurityGroupEgressRule{{To: sdn.SecurityGroupPeer{CIDR: "10.0.0.0/24"}, Ports: ports}}
 					}
-					valid := (protocol == "TCP" || protocol == "UDP") && port >= 1 && port <= 65535
+					valid := (protocol == "TCP" || protocol == "UDP") && port >= 0 && port <= 65535
 					strategy := NewStrategy(nil, nil)
 					old := &sdn.SecurityGroup{Spec: sdn.SecurityGroupSpec{VPCRef: sg.Spec.VPCRef}}
 					for _, errs := range []field.ErrorList{strategy.Validate(context.Background(), sg), strategy.ValidateUpdate(context.Background(), sg, old)} {

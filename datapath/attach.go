@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
 )
 
@@ -33,9 +34,7 @@ import (
 // reconciler can detach a link that ensureTCX is adopting, which is the
 // two-generations state both are written to avoid.
 //
-// It does not — and cannot — serialise against the CNI plugin: that is a
-// separate process. What makes the pair safe across processes is that both
-// paths converge on the same end state and re-run.
+// withBridgeLock also serialises these writers against the separate CNI process.
 var tcxMu sync.Mutex
 
 // We attach with tcx (BPF links), not classic clsact filters: tcx links are
@@ -73,17 +72,29 @@ func OpenPinnedToPod() (*ebpf.Program, error) {
 // AttachIngress attaches the classifier at the ingress of the given interface
 // (a pod's host-side veth) via a pinned tcx link.
 func AttachIngress(ifindex int, prog *ebpf.Program) error {
-	return attachTCX(ifindex, prog, ebpf.AttachTCXIngress, true)
+	return attachTCX(ifindex, prog, ebpf.AttachTCXIngress, true, link.Head())
 }
 
 // AttachEgress attaches the classifier at the egress of the given interface
 // (the node uplink) via a pinned tcx link.
 func AttachEgress(ifindex int, prog *ebpf.Program) error {
-	return attachTCX(ifindex, prog, ebpf.AttachTCXEgress, false)
+	return attachTCX(ifindex, prog, ebpf.AttachTCXEgress, false, link.Tail())
 }
 
-func attachTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress bool) error {
-	return ensureTCX(ifindex, prog, attach, ingress)
+func attachIngressFirst(ifindex int, prog *ebpf.Program) error {
+	return attachTCX(ifindex, prog, ebpf.AttachTCXIngress, true, link.Head())
+}
+
+func attachEgressFirst(ifindex int, prog *ebpf.Program) error {
+	return attachTCX(ifindex, prog, ebpf.AttachTCXEgress, false, link.Head())
+}
+
+func attachTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress bool, anchor link.Anchor) error {
+	return withBridgeLock(func() error {
+		tcxMu.Lock()
+		defer tcxMu.Unlock()
+		return reanchorTCXLocked(ifindex, prog, attach, ingress, anchor)
+	})
 }
 
 // ReattachIngress swaps an interface's ingress classifier to prog. Unlike
@@ -92,17 +103,17 @@ func attachTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress 
 // link is attached before the old pin is replaced, so the interface is never
 // without a classifier — a VPC pod must not see an unfiltered window.
 func ReattachIngress(ifindex int, prog *ebpf.Program) error {
-	return reattachTCX(ifindex, prog, ebpf.AttachTCXIngress, true)
+	return reattachTCX(ifindex, prog, ebpf.AttachTCXIngress, true, link.Head())
 }
 
 // ReattachEgress swaps an interface's egress classifier to prog (see
 // ReattachIngress).
 func ReattachEgress(ifindex int, prog *ebpf.Program) error {
-	return reattachTCX(ifindex, prog, ebpf.AttachTCXEgress, false)
+	return reattachTCX(ifindex, prog, ebpf.AttachTCXEgress, false, link.Tail())
 }
 
-func reattachTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress bool) error {
-	return ensureTCX(ifindex, prog, attach, ingress)
+func reattachTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress bool, anchor link.Anchor) error {
+	return ensureTCX(ifindex, prog, attach, ingress, anchor)
 }
 
 // DetachVeth removes the ingress (from_pod) and egress (to_pod) links for an
@@ -112,6 +123,14 @@ func reattachTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingres
 // whose pin goes away is NOT reliably detached, so pin-removal alone left the
 // program running on a veth the pod no longer owns.
 func DetachVeth(ifindex int) error {
+	return withBridgeLock(func() error {
+		tcxMu.Lock()
+		defer tcxMu.Unlock()
+		return detachVethLocked(ifindex)
+	})
+}
+
+func detachVethLocked(ifindex int) error {
 	for _, ingress := range []bool{true, false} {
 		attach := ebpf.AttachTCXEgress
 		if ingress {
@@ -125,8 +144,13 @@ func DetachVeth(ifindex int) error {
 				}
 			}
 		}
-		if err := os.Remove(linkPinPath(ifindex, ingress)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeTCXGuard(linkPinPath(ifindex, ingress)); err != nil {
 			return err
+		}
+		for _, path := range []string{linkPinPath(ifindex, ingress), linkPinPath(ifindex, ingress) + "-swap"} {
+			if err := removeTCXPin(path); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -148,9 +172,8 @@ func DetachVeth(ifindex int) error {
 // generations stayed attached, and the older one ran first against maps nothing
 // updated any more. detachLink asks the kernel, which is the difference.
 //
-// The window this opens is real and bounded: between detach and re-attach the
-// veth carries no classifier of ours. It is the price of a wrong order, which is
-// worse — a wrong order is a policy bypass, not a gap.
+// A pinned DROP guard covers detach/re-attach, including failures and process
+// interruption. A successful replacement is published before the guard is removed.
 //
 // Foreign links are only ever counted, never touched: ourTCXLinks selects ours,
 // and the peer's programs decide our target index without us moving them.
@@ -160,80 +183,116 @@ func (m *Manager) ReconcilePodTCXOrder() (int, error) {
 		return 0, err
 	}
 
-	hooks := []struct {
+	type podHook struct {
 		name    string
 		program *ebpf.Program
 		attach  ebpf.AttachType
 		ingress bool
-		wantID  ebpf.ProgramID
-	}{
+		id      ebpf.ProgramID
+	}
+	hooks := []podHook{
 		{name: "from_pod", program: m.objs.CozyplaneFromPod, attach: ebpf.AttachTCXIngress, ingress: true},
 		{name: "to_pod", program: m.objs.CozyplaneToPod, attach: ebpf.AttachTCXEgress, ingress: false},
 	}
 	for i := range hooks {
-		id, err := programID(hooks[i].program)
+		info, err := hooks[i].program.Info()
 		if err != nil {
 			return 0, fmt.Errorf("inspect %s program: %w", hooks[i].name, err)
 		}
-		hooks[i].wantID = id
+		programID, ok := info.ID()
+		if !ok {
+			return 0, fmt.Errorf("%s program has no ID", hooks[i].name)
+		}
+		hooks[i].id = programID
 	}
 
 	moved := 0
 	var errs []error
+	if _, err := pruneDetachedTCXPins(); err != nil {
+		errs = append(errs, err)
+	}
 	for _, veth := range veths {
-		// A non-zero network is a VPC leg, where our verdicts must land first.
-		// Net zero is the fabric interface a peer CNI also serves, where it goes
-		// first and we follow.
-		wantFirst := veth.Net != 0
+		// A non-zero network is a Cozyplane VPC leg. Net zero is the fabric
+		// interface shared with Cilium.
+		first := veth.Net != 0
 		for _, hook := range hooks {
-			q, err := link.QueryPrograms(link.QueryOptions{Target: veth.Ifindex, Attach: hook.attach})
-			if err != nil {
-				// A kernel without tcx query, or an interface that just went
-				// away. Neither is ours to fix, and neither is worth a restart.
-				errs = append(errs, fmt.Errorf("query %s on ifindex %d: %w", hook.name, veth.Ifindex, err))
-				continue
-			}
-			ours := -1
-			for i, ap := range q.Programs {
-				if ap.ID == hook.wantID {
-					ours = i
-					break
+			err := withBridgeLock(func() error {
+				tcxMu.Lock()
+				defer tcxMu.Unlock()
+				// The snapshot may race DEL or ifindex reuse; only mutate the
+				// endpoint whose full alias was actually scanned.
+				current := cozyVethByIndex(veth.Ifindex)
+				if current == nil || current.Attrs().Alias != veth.Alias {
+					return nil
 				}
+				result, err := link.QueryPrograms(link.QueryOptions{Target: veth.Ifindex, Attach: hook.attach})
+				if err != nil {
+					return fmt.Errorf("query %s tcx hook on ifindex %d: %w", hook.name, veth.Ifindex, err)
+				}
+				own := -1
+				for i, attached := range result.Programs {
+					if attached.ID == hook.id {
+						own = i
+						break
+					}
+				}
+				pin := linkPinPath(veth.Ifindex, hook.ingress)
+				if tcxOrderOK(own, len(result.Programs), first) {
+					return removeTCXGuard(pin)
+				}
+				// Never detach an attached program whose link we do not own.
+				if _, err := os.Stat(pin); err != nil && own >= 0 {
+					if errors.Is(err, os.ErrNotExist) {
+						return nil
+					}
+					return err
+				}
+				anchor := link.Tail()
+				if first {
+					anchor = link.Head()
+				}
+				if err := reanchorTCXLocked(veth.Ifindex, hook.program, hook.attach, hook.ingress, anchor); err != nil {
+					return fmt.Errorf("reorder %s on ifindex %d: %w", hook.name, veth.Ifindex, err)
+				}
+				moved++
+				return nil
+			})
+			if err != nil {
+				errs = append(errs, err)
 			}
-			if tcxOrderOK(ours, len(q.Programs), wantFirst) {
-				continue
-			}
-			if err := m.reanchorTCX(veth.Ifindex, hook.program, hook.attach, hook.ingress, wantFirst); err != nil {
-				errs = append(errs, fmt.Errorf("reanchor %s on ifindex %d: %w", hook.name, veth.Ifindex, err))
-				continue
-			}
-			moved++
 		}
 	}
 	return moved, errors.Join(errs...)
 }
 
-// reanchorTCX detaches every cozyplane link at a hook and attaches prog at the
-// end the interface requires. Held under tcxMu so a concurrent program reload
-// cannot adopt a link this is detaching.
-func (m *Manager) reanchorTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress, wantFirst bool) error {
-	tcxMu.Lock()
-	defer tcxMu.Unlock()
-
+// reanchorTCXLocked keeps a pinned DROP guard until the replacement is live.
+// The caller holds the host-file lock and tcxMu.
+func reanchorTCXLocked(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress bool, anchor link.Anchor) error {
+	if err := os.MkdirAll(filepath.Join(PinRoot, "links"), 0755); err != nil {
+		return err
+	}
+	pin := linkPinPath(ifindex, ingress)
 	links, _, err := ourTCXLinks(ifindex, attach)
 	if err != nil {
 		return err
 	}
-	for _, l := range links {
-		if derr := detachLink(l); derr != nil && !errors.Is(derr, os.ErrNotExist) {
-			return derr
+	defer func() {
+		for _, current := range links {
+			_ = current.Close()
+		}
+	}()
+	if err := installTCXGuard(ifindex, attach, pin+"-guard"); err != nil {
+		return err
+	}
+	if err := removeTCXPin(pin); err != nil {
+		return err
+	}
+	for _, current := range links {
+		if err := detachLink(current); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
 	}
-	anchor := link.Tail()
-	if wantFirst {
-		anchor = link.Head()
-	}
-	return freshAttachTCX(ifindex, prog, attach, linkPinPath(ifindex, ingress), anchor)
+	return freshAttachTCX(ifindex, prog, attach, pin, anchor)
 }
 
 // cozyplaneProgPrefix identifies our own classifiers among the tcx programs
@@ -413,11 +472,15 @@ func detachLink(l link.Link) error {
 // program swapped in place (atomic, no unfiltered window), any further
 // cozyplane links at the same hook are detached, and only a hook with none of
 // ours gets a fresh attach. Foreign tcx links are never touched.
-func ensureTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress bool) error {
+func ensureTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress bool, anchor link.Anchor) error {
+	return withBridgeLock(func() error { return ensureTCXLocked(ifindex, prog, attach, ingress, anchor) })
+}
+
+func ensureTCXLocked(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress bool, anchor link.Anchor) error {
 	tcxMu.Lock()
 	defer tcxMu.Unlock()
 
-	if err := os.MkdirAll(filepath.Join(PinRoot, "links"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(PinRoot, "links"), 0o755); err != nil {
 		return err
 	}
 	pin := linkPinPath(ifindex, ingress)
@@ -441,11 +504,16 @@ func ensureTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress 
 			if err := keep.Update(prog); err != nil {
 				// No in-place swap on this kernel: fall back to detaching
 				// everything of ours and attaching cleanly.
+				if err := installTCXGuard(ifindex, attach, pin+"-guard"); err != nil {
+					return err
+				}
 				for _, l := range links {
-					_ = detachLink(l)
+					if err := detachLink(l); err != nil {
+						return err
+					}
 				}
 				links = nil
-				return freshAttachTCX(ifindex, prog, attach, pin, nil)
+				return freshAttachTCX(ifindex, prog, attach, pin, anchor)
 			}
 		}
 		for _, i := range plan.stale {
@@ -453,10 +521,13 @@ func ensureTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, ingress 
 				return fmt.Errorf("detach stale tcx link (ifindex %d): %w", ifindex, err)
 			}
 		}
-		return pinLink(keep, pin)
+		if err := pinLink(keep, pin); err != nil {
+			return err
+		}
+		return removeTCXGuard(pin)
 	}
 
-	return freshAttachTCX(ifindex, prog, attach, pin, nil)
+	return freshAttachTCX(ifindex, prog, attach, pin, anchor)
 }
 
 // freshAttachTCX attaches prog at a hook that carries none of our links.
@@ -477,12 +548,6 @@ func freshAttachTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, pin
 		Attach:    attach,
 		Anchor:    anchor,
 	})
-	if isExist(err) {
-		// This exact program is already attached here — a pod ADDed after the
-		// agent pinned the fresh programs (the CNI attaches the same pinned
-		// object). Already the desired end state.
-		return nil
-	}
 	if err != nil {
 		return fmt.Errorf("attach tcx (ifindex %d): %w", ifindex, err)
 	}
@@ -491,7 +556,10 @@ func freshAttachTCX(ifindex int, prog *ebpf.Program, attach ebpf.AttachType, pin
 		return err
 	}
 	// Close our handle; the pin keeps the link (and attachment) alive.
-	return l.Close()
+	if err := l.Close(); err != nil {
+		return err
+	}
+	return removeTCXGuard(pin)
 }
 
 // programID returns prog's kernel id.
@@ -505,4 +573,72 @@ func programID(prog *ebpf.Program) (ebpf.ProgramID, error) {
 		return 0, fmt.Errorf("program info: no id (kernel too old)")
 	}
 	return id, nil
+}
+
+func installTCXGuard(ifindex int, attach ebpf.AttachType, pin string) error {
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Name: "cp_tcx_guard", Type: ebpf.SchedCLS, License: "GPL",
+		Instructions: asm.Instructions{asm.Mov.Imm(asm.R0, 2), asm.Return()}, // TCX_DROP
+	})
+	if err != nil {
+		return fmt.Errorf("load tcx guard: %w", err)
+	}
+	defer prog.Close()
+	l, err := link.AttachTCX(link.TCXOptions{Interface: ifindex, Program: prog, Attach: attach, Anchor: link.Head()})
+	if err != nil {
+		return fmt.Errorf("attach tcx guard: %w", err)
+	}
+	defer l.Close()
+	return replaceTCXPin(l, pin)
+}
+
+func removeTCXGuard(pin string) error {
+	for _, path := range []string{pin + "-guard", pin + "-guard-swap"} {
+		if err := removeTCXPin(path); err != nil {
+			return fmt.Errorf("remove tcx guard: %w", err)
+		}
+	}
+	return nil
+}
+
+// Detach explicitly: dropping a pin alone defers kernel destruction and can
+// leave the same program attached long enough to reject its immediate retry.
+func removeTCXPin(pin string) error {
+	l, err := link.LoadPinnedLink(pin, nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	if err := l.Detach(); err != nil {
+		return err
+	}
+	return l.Unpin()
+}
+
+func replaceTCXPin(l link.Link, pin string) error {
+	old, err := link.LoadPinnedLink(pin, nil)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if old != nil {
+		defer old.Close()
+	}
+	// bpffs rejects dentry names containing dots (EPERM), so the temp pin uses
+	// a dash. Unique per (ifindex, direction), like the pin itself.
+	tmp := pin + "-swap"
+	_ = os.Remove(tmp)
+	if err := l.Pin(tmp); err != nil {
+		return fmt.Errorf("pin tcx link: %w", err)
+	}
+	if err := os.Rename(tmp, pin); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("swap tcx link pin: %w", err)
+	}
+	if old != nil {
+		return old.Detach()
+	}
+	return nil
 }

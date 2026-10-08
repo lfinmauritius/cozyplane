@@ -52,6 +52,9 @@ most likely to set:
   when the platform owns a Multus/Cilium chain; no conflist is created or changed.
 - `cniConfName` — the CNI conflist filename; use a low prefix such as
   `00-cozyplane.conflist` to sort ahead of a co-installed CNI (e.g. Cilium).
+- `cniConfEnabled` controls whether the agent writes that standalone conflist
+  (default `true`). Set it to `false` when the platform supplies a chained
+  conflist, so exactly one component owns CNI configuration.
 - `genevePort` — override only to avoid a clash with another overlay on 6081.
 - `exportPolicy.enabled` — the VPCBinding export admission gate (needs k8s 1.30+).
 - `crds.enabled` — the `local.sdn.cozystack.io` CRDs (default true; disable

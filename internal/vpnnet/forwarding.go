@@ -19,6 +19,16 @@ func EnsureForwarding() error {
 	return nil
 }
 
+// EnsureDualStackForwarding requires both families for the fallback gateway.
+func EnsureDualStackForwarding() error {
+	for _, path := range []string{"net/ipv4/ip_forward", "net/ipv6/conf/all/forwarding"} {
+		if err := ensureProcSys(path, "1"); err != nil {
+			return fmt.Errorf("enable %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 func ensureProcSys(name, want string) error {
 	return ensureFileValue(filepath.Join("/proc/sys", name), want)
 }

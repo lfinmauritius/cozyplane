@@ -71,12 +71,22 @@ const (
 	// cfgGenevePort is the overlay's UDP port (host order) — the host
 	// firewall's transport exemption (docs/host-firewall.md).
 	cfgGenevePort = uint32(8)
-	// cfgHFEnabled arms host-firewall enforcement: 1 while a HostFirewall
-	// selects this node (set after the rule sync, cleared before the wipe).
+	// cfgHFEnabled: 0 disabled, 1 complete rules, 2 temporary default-deny
+	// during updates or after a failed sync.
 	cfgHFEnabled = uint32(9)
 	// cfgHFEgEnabled arms host-firewall EGRESS: the node's own new flows are
 	// default-deny (node→node and node→local-pod stay exempt).
 	cfgHFEgEnabled = uint32(10)
+	// cfgFlowEnabled arms flow observability (docs/observability.md): every
+	// flow_emit site pays one params lookup while it is off.
+	cfgFlowEnabled = uint32(11)
+	// A nonzero policy guard denies new gated flows until the entire policy
+	// snapshot (including endpoint identities) has synced successfully.
+	cfgNPUpdating = uint32(12)
+	cfgSGUpdating = uint32(13)
+	// Go-owned initialization witnesses within the existing 16-slot array.
+	cfgNPInitialized = uint32(14)
+	cfgSGInitialized = uint32(15)
 )
 
 // ResolverPort is the port the split-horizon resolver binds on the node

@@ -203,3 +203,17 @@ func TestReadApplianceStatusValidatesContract(t *testing.T) {
 		t.Fatal("backend mismatch was accepted")
 	}
 }
+
+func TestApplianceStatusRejectsRedirect(t *testing.T) {
+	calls := 0
+	r := &VPNGatewayReconciler{HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": []string{"http://192.0.2.20/private"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+	})}}
+	if _, err := r.readApplianceStatus(t.Context(), "192.0.2.10", backendWireGuard); err == nil {
+		t.Fatal("redirect accepted as appliance status")
+	}
+	if calls != 1 {
+		t.Fatalf("controller followed redirect: %d requests", calls)
+	}
+}

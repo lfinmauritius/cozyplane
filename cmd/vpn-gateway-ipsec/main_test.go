@@ -64,6 +64,64 @@ func TestIPsecStartAction(t *testing.T) {
 	}
 }
 
+type recordingVICI struct {
+	commands []string
+	requests []*vici.Message
+}
+
+func TestPeerIdentityCollection(t *testing.T) {
+	for _, mode := range []string{"psk", "certificate", "eap"} {
+		peers := []peer{
+			{Name: "peer-a", AuthMode: mode, RemoteID: "peer.example.invalid", EAPIdentity: "peer@example.invalid"},
+			{Name: "peer-b", AuthMode: mode, RemoteID: "@PEER.example.invalid", EAPIdentity: "email:PEER@example.invalid"},
+		}
+		if err := validatePeerIdentities(peers); err == nil {
+			t.Errorf("accepted duplicate %s authorization", mode)
+		}
+		peers[1].RemoteID = "other.example.invalid"
+		peers[1].EAPIdentity = "other@example.invalid"
+		if err := validatePeerIdentities(peers); err != nil {
+			t.Errorf("rejected distinct %s identities: %v", mode, err)
+		}
+	}
+}
+
+func (s *recordingVICI) CommandRequest(command string, request *vici.Message) (*vici.Message, error) {
+	s.commands = append(s.commands, command)
+	s.requests = append(s.requests, request)
+	return vici.NewMessage(), nil
+}
+
+func TestPeerCredentialAndTrafficIsolation(t *testing.T) {
+	s := &recordingVICI{}
+	p := peer{Name: "peer-a", PSK: "test-credential", RemoteID: "192.0.2.10", RemoteCIDRs: []string{"10.20.0.0/16"}, IfID: 7}
+	if err := loadPeer(s, p); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.commands, []string{"load-shared", "load-conn"}) {
+		t.Fatalf("commands = %v", s.commands)
+	}
+	if owners := s.requests[0].Get("owners"); !reflect.DeepEqual(owners, []string{p.RemoteID}) {
+		t.Fatalf("credential owners = %v", owners)
+	}
+	conn := s.requests[1].Get(p.Name).(*vici.Message)
+	remote := conn.Get("remote").(*vici.Message)
+	if remote.Get("id") != p.RemoteID {
+		t.Fatalf("remote identity = %v", remote.Get("id"))
+	}
+	children := conn.Get("children").(*vici.Message)
+	child := children.Get(p.Name).(*vici.Message)
+	if selectors := child.Get("remote_ts"); !reflect.DeepEqual(selectors, p.RemoteCIDRs) {
+		t.Fatalf("remote traffic selectors = %v", selectors)
+	}
+	for _, identity := range []string{"", "%any", "*.example.invalid", "^peer.*", "0.0.0.0", "::", "0::0", "10.0.0.0/8", "{0}:peer", "fqdn:^peer[0-9]+$", "\x00"} {
+		p.RemoteID = identity
+		if err := loadPeer(&recordingVICI{}, p); err == nil {
+			t.Fatalf("accepted unrestricted identity %q", identity)
+		}
+	}
+}
+
 func ipsecSAEvent(t *testing.T, name, state string, rxBytes, txBytes, rxPackets, txPackets, established uint64) *vici.Message {
 	t.Helper()
 	child := vici.NewMessage()

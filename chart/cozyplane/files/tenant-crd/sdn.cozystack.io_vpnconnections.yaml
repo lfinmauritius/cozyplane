@@ -131,6 +131,12 @@ spec:
                       type: string
                     type: array
                     x-kubernetes-list-type: atomic
+                  remoteIdentity:
+                    description: |-
+                      RemoteIdentity binds a PSK to this exact IKE identity. When omitted, an
+                      IP-valued PeerAddress supplies the identity. Required for PSK responders
+                      without a fixed IP endpoint and for endpoints named by DNS.
+                    type: string
                   startAction:
                     description: |-
                       StartAction selects whether this side actively initiates IKE. When unset,

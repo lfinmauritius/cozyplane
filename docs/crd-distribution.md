@@ -1,3 +1,7 @@
+> Validation scope: lab results and earlier source hashes below describe their
+> original branches. They do not certify this combined integration. Its current
+> build, race, kernel and deployment checks are recorded separately.
+
 # CRD distribution
 
 The requested CRD distribution must provide the same eleven tenant kinds,

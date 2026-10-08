@@ -22,6 +22,8 @@ import (
 	"net"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
+	"github.com/lllamnyp/cozyplane/internal/vpnidentity"
+	"github.com/lllamnyp/cozyplane/internal/vpnlimits"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -108,12 +110,55 @@ func (vpnConnectionStrategy) ValidateUpdate(ctx context.Context, obj, old runtim
 func validateVPNConnection(conn *sdn.VPNConnection) field.ErrorList {
 	var errs field.ErrorList
 	specPath := field.NewPath("spec")
-	if conn.Spec.GatewayRef.Name == "" {
-		errs = append(errs, field.Required(specPath.Child("gatewayRef", "name"), "gateway name is required"))
+	errs = append(errs, vpnlimits.ReferenceErrors(conn.Spec.GatewayRef.Name, specPath.Child("gatewayRef", "name"), true)...)
+	if wg := conn.Spec.WireGuard; wg != nil {
+		errs = append(errs, vpnlimits.ReferenceErrors(wg.PresharedKeySecretRef, specPath.Child("wireGuard", "presharedKeySecretRef"), false)...)
+	}
+	if ipsec := conn.Spec.IPsec; ipsec != nil {
+		auth := specPath.Child("ipsec", "auth")
+		errs = append(errs, vpnlimits.ReferenceErrors(ipsec.Auth.PSKSecretRef, auth.Child("pskSecretRef"), false)...)
+		if eap := ipsec.Auth.EAP; eap != nil {
+			errs = append(errs, vpnlimits.ReferenceErrors(eap.SecretRef, auth.Child("eap", "secretRef"), true)...)
+		}
+	}
+	if len(errs) != 0 {
+		return errs
+	}
+	if ipsec := conn.Spec.IPsec; ipsec != nil {
+		certificate, eap := "", ""
+		if problem := vpnlimits.IPsecPoolNameProblem(ipsec.AddressPool, false); problem != "" {
+			return field.ErrorList{field.Invalid(specPath.Child("ipsec", "addressPool"), nil, problem)}
+		}
+		if ipsec.Auth.Certificate != nil {
+			certificate = ipsec.Auth.Certificate.RemoteIdentity
+		}
+		if ipsec.Auth.EAP != nil {
+			eap = ipsec.Auth.EAP.Identity
+		}
+		if problem := vpnlimits.IPsecScalarProblem(ipsec.PeerAddress, ipsec.RemoteIdentity, certificate, eap); problem != "" {
+			return field.ErrorList{field.Invalid(specPath.Child("ipsec"), nil, problem)}
+		}
+		if problem := vpnlimits.IPsecProposalProblem(ipsec.Proposals); problem != "" {
+			return field.ErrorList{field.Invalid(specPath.Child("ipsec", "proposals"), nil, problem)}
+		}
+	}
+	if wg := conn.Spec.WireGuard; wg != nil {
+		if problem := vpnlimits.WireGuardPeerProblem(vpnlimits.WireGuardPeer{
+			PublicKey: wg.PeerPublicKey, PublicKeys: wg.PeerPublicKeys,
+			Endpoint: wg.PeerEndpoint, Endpoints: wg.PeerEndpoints, Keepalive: int64(wg.PersistentKeepalive),
+		}); problem != "" {
+			return field.ErrorList{field.Invalid(specPath.Child("wireGuard"), nil, problem)}
+		}
+	}
+	if len(conn.Spec.RemoteCIDRs) > vpnlimits.RoutePrefixes {
+		return field.ErrorList{field.TooMany(specPath.Child("remoteCIDRs"), len(conn.Spec.RemoteCIDRs), vpnlimits.RoutePrefixes)}
 	}
 	for i, cidr := range conn.Spec.RemoteCIDRs {
+		if len(cidr) > vpnlimits.RoutePrefixBytes {
+			return field.ErrorList{field.Invalid(specPath.Child("remoteCIDRs").Index(i), nil, "must contain at most 64 bytes")}
+		}
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			errs = append(errs, field.Invalid(specPath.Child("remoteCIDRs").Index(i), cidr, "must be a valid CIDR"))
+			return field.ErrorList{field.Invalid(specPath.Child("remoteCIDRs").Index(i), nil, "must be a valid CIDR")}
 		}
 	}
 	backends := 0
@@ -124,36 +169,14 @@ func validateVPNConnection(conn *sdn.VPNConnection) field.ErrorList {
 		backends++
 	}
 	if backends > 1 {
-		errs = append(errs, field.Invalid(specPath, conn.Spec, "wireGuard and ipsec are mutually exclusive"))
-	}
-	if wireguard := conn.Spec.WireGuard; wireguard != nil {
-		wgPath := specPath.Child("wireGuard")
-		if wireguard.PeerPublicKey == "" && len(wireguard.PeerPublicKeys) == 0 {
-			errs = append(errs, field.Required(wgPath.Child("peerPublicKey"), "one peer public key or an active-active pair is required"))
-		}
-		if wireguard.PeerPublicKey != "" && len(wireguard.PeerPublicKeys) > 0 {
-			errs = append(errs, field.Invalid(wgPath, *wireguard, "peerPublicKey and peerPublicKeys are mutually exclusive"))
-		}
-		if len(wireguard.PeerPublicKeys) > 0 && len(wireguard.PeerPublicKeys) != 2 {
-			errs = append(errs, field.Invalid(wgPath.Child("peerPublicKeys"), wireguard.PeerPublicKeys, "active-active requires exactly two keys"))
-		}
-		if wireguard.PeerEndpoint != "" && len(wireguard.PeerEndpoints) > 0 {
-			errs = append(errs, field.Invalid(wgPath, *wireguard, "peerEndpoint and peerEndpoints are mutually exclusive"))
-		}
-		if len(wireguard.PeerEndpoints) > 0 && len(wireguard.PeerEndpoints) != len(wireguard.PeerPublicKeys) {
-			errs = append(errs, field.Invalid(wgPath.Child("peerEndpoints"), wireguard.PeerEndpoints, "must contain one endpoint per peerPublicKeys entry"))
-		}
-		if len(wireguard.PeerPublicKeys) > 0 && wireguard.PeerEndpoint != "" {
-			errs = append(errs, field.Invalid(wgPath.Child("peerEndpoint"), wireguard.PeerEndpoint, "use peerEndpoints with active-active peerPublicKeys"))
-		}
+		errs = append(errs, field.Invalid(specPath, nil, "wireGuard and ipsec are mutually exclusive"))
 	}
 	if ipsec := conn.Spec.IPsec; ipsec != nil {
 		startPath := specPath.Child("ipsec", "startAction")
 		switch ipsec.StartAction {
 		case "", sdn.VPNIPsecStartActionStart, sdn.VPNIPsecStartActionNone:
 		default:
-			errs = append(errs, field.NotSupported(startPath, ipsec.StartAction,
-				[]string{string(sdn.VPNIPsecStartActionStart), string(sdn.VPNIPsecStartActionNone)}))
+			errs = append(errs, field.Invalid(startPath, nil, "must be Start or None"))
 		}
 		if ipsec.StartAction == sdn.VPNIPsecStartActionStart && ipsec.PeerAddress == "" {
 			errs = append(errs, field.Required(specPath.Child("ipsec", "peerAddress"),
@@ -166,18 +189,27 @@ func validateVPNConnection(conn *sdn.VPNConnection) field.ErrorList {
 		authMethods := 0
 		if ipsec.Auth.PSKSecretRef != "" {
 			authMethods++
+			identity := ipsec.RemoteIdentity
+			if identity == "" {
+				if ip := net.ParseIP(ipsec.PeerAddress); ip != nil {
+					identity = ip.String()
+				}
+			}
+			if !exactIdentity(identity) {
+				errs = append(errs, field.Invalid(specPath.Child("ipsec", "remoteIdentity"), identity, "PSK authentication requires an exact remote identity or IP peerAddress"))
+			}
 		}
 		if ipsec.Auth.Certificate != nil {
 			authMethods++
-			if ipsec.Auth.Certificate.RemoteIdentity == "" {
-				errs = append(errs, field.Required(authPath.Child("certificate", "remoteIdentity"),
+			if !exactIdentity(ipsec.Auth.Certificate.RemoteIdentity) {
+				errs = append(errs, field.Invalid(authPath.Child("certificate", "remoteIdentity"), ipsec.Auth.Certificate.RemoteIdentity,
 					"remoteIdentity binds the connection to one certificate identity"))
 			}
 		}
 		if ipsec.Auth.EAP != nil {
 			authMethods++
-			if ipsec.Auth.EAP.Identity == "" {
-				errs = append(errs, field.Required(authPath.Child("eap", "identity"), "EAP identity is required"))
+			if !exactIdentity(ipsec.Auth.EAP.Identity) {
+				errs = append(errs, field.Invalid(authPath.Child("eap", "identity"), ipsec.Auth.EAP.Identity, "an exact EAP identity is required"))
 			}
 			if ipsec.Auth.EAP.SecretRef == "" {
 				errs = append(errs, field.Required(authPath.Child("eap", "secretRef"), "EAP password Secret is required"))
@@ -187,13 +219,13 @@ func validateVPNConnection(conn *sdn.VPNConnection) field.ErrorList {
 					"EAP roadwarrior connections require an address pool"))
 			}
 		}
-		if authMethods > 1 {
-			errs = append(errs, field.Invalid(authPath, ipsec.Auth,
-				"pskSecretRef, certificate, and eap are mutually exclusive"))
+		if authMethods != 1 {
+			errs = append(errs, field.Invalid(authPath, nil,
+				"exactly one of pskSecretRef, certificate, and eap is required"))
 		}
 		if ipsec.AddressPool != "" {
 			if ipsec.Auth.Certificate == nil && ipsec.Auth.EAP == nil {
-				errs = append(errs, field.Invalid(specPath.Child("ipsec", "addressPool"), ipsec.AddressPool,
+				errs = append(errs, field.Invalid(specPath.Child("ipsec", "addressPool"), nil,
 					"an address pool requires certificate or EAP authentication"))
 			}
 			if ipsec.StartAction == sdn.VPNIPsecStartActionStart {
@@ -210,6 +242,10 @@ func validateVPNConnection(conn *sdn.VPNConnection) field.ErrorList {
 }
 
 // WarningsOnUpdate returns warnings for the given update.
+func exactIdentity(identity string) bool {
+	return vpnidentity.Exact(identity)
+}
+
 func (vpnConnectionStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {
 	return nil
 }

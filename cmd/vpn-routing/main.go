@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -85,12 +86,34 @@ func run(path, podIP string) error {
 	}
 	commands = append(commands, []string{"/usr/lib/frr/bgpd", "-f", frrConfigPath, "-z", filepath.Join(frrRunDir, "zserv.api"), "-i", filepath.Join(frrRunDir, "bgpd.pid")})
 
-	exited := make(chan error, len(commands))
+	return superviseFRR(ctx, commands, func(ctx context.Context) error {
+		ready, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		return waitForPath(ready, filepath.Join(frrRunDir, "zserv.api"))
+	})
+}
+
+func superviseFRR(parent context.Context, commands [][]string, ready func(context.Context) error) error {
+	ctx, cancel := context.WithCancelCause(parent)
+	var children sync.WaitGroup
+	defer func() { cancel(context.Canceled); children.Wait() }()
 	for i, argv := range commands {
 		if i > 0 {
-			if err := waitForPath(ctx, filepath.Join(frrRunDir, "zserv.api")); err != nil {
+			if err := ready(ctx); err != nil {
+				if parent.Err() != nil {
+					return nil
+				}
+				if cause := context.Cause(ctx); cause != nil {
+					return cause
+				}
 				return err
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			if parent.Err() != nil {
+				return nil
+			}
+			return context.Cause(ctx)
 		}
 		// #nosec G204 -- Executable and arguments come only from the three literal FRR commands above; no shell or tenant-supplied arguments.
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -98,14 +121,21 @@ func run(path, podIP string) error {
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("start %s: %w", filepath.Base(argv[0]), err)
 		}
-		go func(name string) { exited <- fmt.Errorf("%s exited: %w", name, cmd.Wait()) }(filepath.Base(argv[0]))
+		children.Add(1)
+		go func(name string) {
+			defer children.Done()
+			err := cmd.Wait()
+			if err == nil {
+				err = errors.New("daemon exited without error")
+			}
+			cancel(fmt.Errorf("%s exited: %w", name, err))
+		}(filepath.Base(argv[0]))
 	}
-	select {
-	case <-ctx.Done():
+	<-ctx.Done()
+	if parent.Err() != nil {
 		return nil
-	case err := <-exited:
-		return err
 	}
+	return context.Cause(ctx)
 }
 
 func waitForPath(ctx context.Context, path string) error {

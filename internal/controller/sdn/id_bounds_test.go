@@ -65,7 +65,7 @@ func TestPendingOrInvalidSelectedGroupRetainsPolicy(t *testing.T) {
 		group.Status.ID = id
 		port := &sdnv1alpha1.Port{Spec: sdnv1alpha1.PortSpec{VPCRef: sdnv1alpha1.VPCRef{Namespace: "test", Name: "vpc"}}, Status: sdnv1alpha1.PortStatus{Groups: []int32{1}}}
 		port.Name = "v100.10-0-0-2"
-		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&sdnv1alpha1.Port{}).WithObjects(group, port).Build()
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&sdnv1alpha1.Port{}).WithIndex(&sdnv1alpha1.SecurityGroup{}, membershipVPCIndex, membershipVPCKeys).WithObjects(group, port).Build()
 		r := &PortMembershipReconciler{Client: c, SentinelReady: func(context.Context) (bool, error) { return true, nil }}
 		key := types.NamespacedName{Name: port.Name}
 		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {

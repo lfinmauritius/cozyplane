@@ -18,6 +18,46 @@ proposal stands on.
 
 ## 0. The problem
 
+A deleting VPNGateway or referenced VPC cannot realize an active VPN. The
+controller tears down its owned appliance, attachment/forwarding binding and
+public endpoints, clears active status and does not recreate those resources
+during finalization. VPC lifecycle events enqueue their referencing gateways;
+cleanup still verifies ownership before deleting objects. Inert key/config
+Secrets retain the existing owner/garbage-collection lifecycle.
+
+VPN cache queries for VPC/Port events select only gateways referencing that VPC
+in its namespace. Peer resolution uses a gateway-reference index rather than
+copying every VPNConnection in the namespace on each poll. These indexes follow
+reference updates and deletion and do not replace the live API quota reader.
+
+Live tunnel observations update VPNConnection status without triggering another
+gateway reconciliation. The connection watch accepts creation/deletion, spec
+changes, UID replacement and deletion start, and ignores status-only updates.
+The configured poll interval supplies fresh observations; peer retargets map both
+old and new gateways so the predecessor authorization is revoked.
+
+Managed VPN route input is capped at 4,096 prefix candidates across a gateway's
+connections, including selected roadwarrior pool prefixes. Duplicates count as
+input work. Quotas are checked before prefix filtering/configuration, and prefix
+capacity is checked before and after pool expansion. An oversized gateway loses
+its owned active resources and reports `InputLimitExceeded`; correcting the
+input permits recovery without rotating its retained key. Rejection diagnostics
+retain at most 32 short examples plus an omitted-count summary. This bounds work
+per reconciliation and does not reserve capacity in the shared node route map.
+
+Gateway input also permits at most 128 IPsec pools, 16 DNS servers per pool and
+64 BGP neighbors. Aggregated API admission refuses larger collections before
+pool overlap validation or per-item parsing; controller preflight refuses
+legacy oversized gateways before pool expansion, key creation or credential
+reads, and withdraws owned active resources through the same rejection path.
+
+Credential Secret notifications use namespace-scoped reference indexes on
+VPNGateway and VPNConnection. An unrelated Secret must not copy every gateway
+and peer in the namespace. TLS/CA, WireGuard PSK, IPsec PSK and EAP references
+remain observable on rotation/deletion; references removed or retargeted in spec
+leave no historical index entry. Peer consumers resolve their current gateway
+from the cache rather than relying on the TLS/CA consumer list.
+
 A tenant has a network that is not this cluster — an office behind a firewall, a
 lab, another cloud — and wants private, addressed connectivity between it and
 their VPC. Today the sanctioned crossings are LoadBalancer ingress, the EIP
@@ -142,6 +182,16 @@ same total order `EffectiveGateway` and `reconcileAppliance` use, so every
 controller replica agrees. The result is a Port identity written to status; the
 workload can move and the route follows.
 
+Route and appliance selection verifies the selected pod UID against the Port's
+protected pod-uid label, excludes terminating Ports and terminating or completed
+pods, and verifies the Port's VPC reference and claim name against the current
+VPC VNI and canonical IP. A predecessor claim cannot gain the replacement pod's
+selector authority. Persistent VM Ports retain their IP/MAC and become eligible
+again when migration cutover updates their binding to the active launcher UID.
+Managed VPN appliance resolution applies the same claim checks in both single
+endpoint and active-active selection, in addition to readiness and the existing
+gateway/workload owner-reference chain.
+
 Authorship split, stated plainly: routes are authored by whoever edits the
 `VPCGateway` (the tenant — pointing your own VPC's traffic somewhere inside your
 own network is yours to decide). The right of the *target* to forward foreign
@@ -160,13 +210,141 @@ vpc_routes : LPM { u32 scope_net; struct addr128 prefix } → { gw_ip, node_ip }
 in `cozyplane_from_pod` for an off-VPC destination becomes:
 
 ```
-floating_egress → vpc_routes (LPM, longest prefix) → vpc_nat_snat → gateways[vni] → drop
+vpc_routes (LPM, longest prefix) → DNS/LB return → floating_egress → vpc_nat_snat → gateways[vni] → drop
 ```
 
 The route lookup **must precede** the NAT decision — that is the entire point
 (§2, problem 1). A miss changes nothing: existing behavior is the fallback at
 every step. `cozyplane_from_overlay`'s VPC branch needs the mirror-image probe
 where it consults `gateways` today.
+
+Route reconciliation rejects an incomplete or oversized snapshot before any
+route-map mutation. The agent bounds candidate rows by the actual vpc_routes
+capacity (4096 in the shipped datapath), allows at most two next-hop names per
+status route, and budgets at most 1048576 input operations before copying or
+expanding route inputs. Duplicate candidates still consume this compilation
+budget. Cancellation aborts compilation without publishing. The datapath writer
+also checks the unique desired-map capacity before pruning old rows. A rejected
+snapshot retains the last complete routes; a later valid snapshot replaces it
+and removes stale rows. This is a resource/availability bound, not an atomic
+transaction across simultaneous Kubernetes object updates.
+
+Security audit SEC188 reproduced IPv4 and IPv6 cleartext SNAT after capacity
+rejection: preserving old entries alone does not protect newly requested prefixes.
+A pinned one-cell `route_guard` now closes off-VPC workload egress before route
+compilation and every map replacement. Agent load arms it before attaching new
+hooks, including on compatible restarts. Only a complete successful publication
+clears it; cancellation, invalid input, capacity or map-write failure leave it
+closed. Reconciliation still retains old rows on preflight failure, but these
+rows cannot authorize fallback through DNS, floating, NAT or a default appliance.
+This conservative guard covers all VPCs on the affected node: availability of
+ordinary off-VPC traffic can be interrupted until a fitting snapshot is restored.
+Intra-VPC/peered delivery and node/fabric plumbing remain separate. This is a
+bounded confidentiality safeguard, not a per-tenant quota or a simultaneous
+transaction with Kubernetes events that the agent has not observed yet.
+
+An explicit prefix without any usable next hop is encoded with `count=0`, meaning
+blackhole, not absence. It cannot fall back to NAT or a broader prefix. Receive-side
+explicit routes also precede the default gateway; an unavailable, wrong-node or
+blackhole next hop drops rather than handing routed traffic to that gateway.
+The controller publishes accepted remote prefixes even while the appliance has
+no Ready Port (SEC190); their empty next-hop list is the blackhole above.
+Readiness conditions remain false until the required appliances resolve.
+Withdrawing a connection removes its prefixes on reconciliation. Pending
+appliance status must never imply permission to use ordinary Internet egress.
+Quota, input-limit and address-pool rejection also retain previously accepted
+prefixes as blackholes after draining workload/forwarding authorization (SEC191).
+Retention is bounded to 4096 rows/prefix candidates and 64 bytes per CIDR before
+copying; an oversized legacy status fails reconciliation rather than publishing
+an empty route list. Gateway deletion and loss of its VPC withdraw that intent;
+a valid subsequent reconciliation replaces the retained prefixes normally.
+
+VPN peer-list resource safeguard (SEC193): the
+controller rejects a gateway beyond its peer quota before copying an unlimited
+peer set.
+A bounded lookup must select only non-terminating peers and retrieve the quota
+plus one overflow witness; a fitting set is complete, never a truncated
+appliance configuration. Cache storage/index pointer enumeration remains
+proportional to stored objects and needs separate admission-level protection.
+
+Namespace-quota resource safeguard (SEC194): live gateway
+counts must use pages of 128 objects and a shared 30-second deadline, at most
+65536 objects, retaining counts rather than all gateway payloads or a sorted
+copy. A complete scan preserves the oldest-wins order (creation time, then
+name). Missing/replaced targets, partial scans, stalled continuations and budget
+failures must never admit a gateway. Without a live reader, only a complete
+cached namespace result smaller than one page can prove admission; saturation
+is an error rather than an arbitrary truncated ranking.
+
+Appliance-resolution resource safeguard (SEC195): finding the
+one or two VPN endpoints must not copy every workload Port of their VPC on
+each status poll. Select candidate claims by their spec pod namespace/name,
+then retain the existing current pod UID, VPC, canonical address and workload
+ownership checks. Without an owned Ready pod there is no Port lookup.
+The index does not build keys for malformed references exceeding namespace
+63 bytes or pod-name 253 bytes; such references cannot name a Kubernetes pod.
+
+VPN object-reference safeguard (SEC197): gateway, VPC, credential Secret,
+address-claim and VM state/cloud-init references must be DNS subdomain object
+names of at most 253 bytes. Optional references may be empty. Admission checks
+references before diagnostics that could retain a whole malformed spec. The
+controller also rejects legacy malformed references before lookup/configuration,
+and does not enqueue or index unusable targets. Diagnostics never include the
+unbounded reference. Active-active address-claim lists contain at most two names.
+These checks bound reference size; they do not bound the rate or total number
+of valid updates and are not a universal controller memory quota.
+
+Sandbox selection for managed VPN and explicit/default next hops (SEC196): an old ephemeral Port
+can retain the same pod UID after a sandbox recreation until GC completes.
+When canonical FabricIP claims for the Ready pod’s current status addresses
+agree on its sandbox identity, select only a Port recorded for that sandbox.
+The witness already validates node, pod namespace/name/UID, claim address and
+primary interface, and reads at most two individual FabricIP objects. Legacy
+claims without a usable witness retain the existing UID/VPC ownership checks;
+this is not authorization to delete legacy claims or reallocate pinned VM IPs.
+
+Both user-authored VPCGateway routes and managed VPN remote prefixes use the
+same CIDR deny-set. Before resolving next hops, the controller removes invalid
+prefixes, prefixes overlapping loopback, link-local, CGNAT or multicast ranges,
+and prefixes overlapping the networks configured with --internal-cidrs. This
+also refuses default routes containing those ranges. Rejected prefixes appear
+in RoutesResolved=False; allowed prefixes in the same route remain usable.
+An entirely rejected route has no next hop. Configuration must include actual
+pod, service and node networks; the controller cannot infer omitted networks.
+
+Only the oldest non-terminating VPCGateway for a namespace/VPC may publish
+explicit routes. The agent independently computes that winner from metadata,
+including when stale status on a losing gateway still contains routes. A losing
+gateway cannot clear the winning gateway's appliance Port flag. Removing the
+winner promotes its successor using the same deterministic selection rule.
+
+The agent resolves both VPCGateway and VPNGateway route status within the
+gateway's current namespace/VPC reference. It waits for the VPC cache as well
+as gateway/Port caches, requires a live VPC with an allocated VNI, and accepts
+only non-terminating Ports whose full VPC reference and canonical address claim
+match that VNI. A stale status cannot choose its own source scope from an old
+next-hop Port after a gateway reference change or VPC recreation.
+
+Controller route resolution accepts at most 4096 route declarations and 4096
+total prefix candidates per gateway, counting duplicates. It refuses oversized
+inputs before listing selector targets and publishes no partial route status.
+Ports are indexed once by pod namespace/name rather than scanning every VPC
+Port for every route. Each reconciliation permits at most 1048576 input/candidate
+operations, checks cancellation, and retains at most 32 diagnostics of 96 bytes
+each plus an omitted-count summary. These are per-reconciliation CPU and transient
+heap bounds; they do not assert that the entire informer cache has a fixed size.
+
+Pod notifications for VPC routes/appliances use a cache index of the namespaces
+their selectors actually reference, including explicit cross-namespace selectors.
+The handler then checks the pod labels against those selectors and maps both old
+and new pod objects, so label removal still revokes a resolved route. It does not
+copy every gateway in the cluster or enqueue unrelated selectors on ordinary pod
+status churn. Index entries are derived from current gateway specs and removed
+with their objects rather than retained as event history.
+Pod status-only updates that do not change terminal eligibility are ignored by
+this watch. UID, labels, deletion start and completed/non-completed transitions
+still trigger resolution; the independent Port watch follows address/node/claim
+changes. This filter applies only to VPC route/appliance selection.
 
 Two datapath cautions, both known territory: `from_pod` sits at ~496 of 512
 combined stack bytes and hosts no BPF-to-BPF callee — the lookup must be
@@ -537,10 +715,10 @@ what was done:
   gateway namespaces is a hardening follow-up.
 - **Owed — `--internal-cidrs` must include the node network** for the deny-set to
   cover it (the built-in reserved set does not know node subnets), and
-  **per-node `vpc_routes` exhaustion** (cap 4096, no per-tenant map quota) falls
-  back to the NAT path silently — fail-closed for cross-tenant isolation, but a
-  route that should tunnel could egress cleartext under saturation; a saturation
-  metric + a drop-on-expected-route mode are owed (increment 6 guardrail).
+  **per-node `vpc_routes` capacity** is 4096, without a per-tenant map quota.
+  The SEC188 guard denies off-VPC traffic while a complete snapshot cannot be
+  installed, preventing cleartext fallback. A saturation metric and fair
+  per-tenant quotas remain owed for availability (increment 6 guardrail).
 
 ## 6. Metering and observability
 
@@ -668,8 +846,8 @@ datapath, which the route-based design exists to avoid.
      node, service, pod sources all dropped), the export gate blocking a
      non-owner from widening the grant, routes VNI-scoped, door metering,
      verifier-clean load, fail-closed map exhaustion. **Known limitations owed
-     before/at merge** (none re-open the blanket spoof #6 closed; all bounded to
-     the tenant's own namespace): (a) *grant granularity* — `forwardingCIDRs`
+     before/at merge** (none re-open the blanket spoof #6 closed; shared map
+     capacity can affect other VPCs on a node): (a) *grant granularity* — `forwardingCIDRs`
      scopes to prefixes but `VPCBinding` has no pod selector, so like
      `allowForwarding` today the grant covers every pod bound to the VPC in the
      namespace, not only the appliance (a binding-model question for the
@@ -678,7 +856,9 @@ datapath, which the route-based design exists to avoid.
      only steers a VPC pod's off-VPC egress so node/cross-tenant traffic is
      unaffected, but the deny-set is owed; (c) *per-node map quotas* —
      `vpc_routes`/`fwd_cidrs` are per-node (cap 4096) with no per-tenant quota,
-     exhaustion fail-closed (increment 6 guardrail); (d) *`fwd_cidrs` reclaim* —
+     route exhaustion now closes off-VPC workload egress on the affected node
+     until a complete fitting snapshot is restored (SEC188); fair per-tenant
+     capacity isolation remains owed. (d) *`fwd_cidrs` reclaim* —
      cleared at CNI ADD (closing the ifindex-reuse hazard) but not at DEL; a
      slow, bounded, non-security leak a rebuild-scan prune would close.
 2. **[DONE] Managed WireGuard** — the tenant declares intent, the controller
@@ -865,3 +1045,154 @@ an *outbound proxy*, a different product; both apps stay, and the dashboard copy
 must make the distinction. And the `VirtualPrivateCloud` app (kube-ovn-backed
 today) is the natural object to grow VPN-facing fields once cozyplane backs it —
 out of scope here, noted so the two designs do not drift apart.
+### IPsec status resource bounds
+
+Only one IPsec status/metrics/readiness collection runs at a time; concurrent
+requests return 503 instead of queueing on a mutex. Each collection opens its
+own VICI session, honors request cancellation and a five-second deadline, and
+closes the session on completion. Streams retain at most 4096 events, one MiB
+per framed response and eight MiB of framed data per collection. An incomplete
+or oversized snapshot returns 503. The HTTP server closes during shutdown.
+Cancellation reports the context's error consistently, including when closing
+the VICI socket wins the race with an in-flight read or deadline operation.
+### Exact IKE identity validation
+
+Remote PSK/certificate and EAP identities use one shared validator at API,
+controller and appliance boundaries. In addition to explicit wildcards, it
+rejects unspecified IP spellings (`0.0.0.0`, `::`, `0::0`), IP subnet/range
+identities, typed subnet/range forms, numeric identity types, regex and encoded
+identity syntax, control bytes and surrounding whitespace. These forms can be
+interpreted as wildcard or multi-peer matches by strongSwan's identity parser.
+Plain non-unspecified IPs, FQDNs, email identities and ordinary DNs remain valid.
+### IPsec child process lifecycle
+
+The appliance supervises charon during initialization as well as normal
+operation. A daemon exit cancels pending VICI initialization immediately and
+returns an error for restart. Initialization has a 30-second budget and each
+configuration command a five-second budget. On any return, the child is stopped
+and reaped, and the metrics server is canceled and joined.
+Duplicate remote identities are compared by parsed type and canonical spelling
+for IP, FQDN and email identities, including strongSwan's `@`/`@@` and textual
+type-prefix aliases. Case or equivalent IP spelling cannot give two connections
+different authorization rules for the same authenticated identity.
+
+Certificate distinguished names use comma-separated named attributes, at most
+20 nonempty components. Attribute aliases, surrounding component spaces and
+case differences are normalized for duplicate detection. Malformed or ambiguous
+DN syntax is rejected rather than silently falling back to a key ID. Use an
+explicit `keyid:` prefix for a literal key ID containing `=`.
+
+The routing sidecar supervises every FRR child from its launch, including while
+waiting for Zebra's socket. A child exit cancels startup and stops the siblings;
+socket readiness has a 30-second budget. Shutdown and partial startup failures
+stop and reap every child before the sidecar returns.
+
+### Configuration failure and protected route intent
+
+Once the controller has a complete, under-quota set of connections and has
+filtered forbidden prefixes, their accepted remote prefixes remain protected
+even when identity/configuration Secret generation fails. Publish these prefixes
+as unresolved routes when the accepted prefix set changes, before attempting
+credentials or the appliance; no next-hop authority is retained in that
+publication. Unchanged intent performs no status write or readiness cycle. A
+failed/conflicting publication stops realization and remains a retry error. Authentication/configuration failures
+drain only this gateway's owned workloads and grants, retain the unresolved
+prefixes, and report Pending. Preserve the original error so retries still run.
+An explicit peer withdrawal removes its prefixes; VPC authorization removal and
+gateway deletion still withdraw intent. Never publish an incomplete peer scan
+or a partially validated input set as authoritative route intent.
+
+### WireGuard input budgets
+
+WireGuard public, private and preshared keys use the canonical padded base64
+encoding of exactly 32 bytes (44 characters). Reject oversized values before
+base64 decoding or JSON serialization, including stored legacy inputs. Peer
+key/endpoint pairs are limited to two before traversing them; single-key and
+paired forms are mutually exclusive. Endpoints are optional for roaming peers;
+when present they contain a nonempty host and numeric UDP port1..65535 and are
+at most512 bytes. Keepalive is in0..65535 seconds. Apply these checks at API
+admission and rendering, with an appliance check before parsing keys or DNS.
+Key Secrets may include the one trailing LF or CRLF produced by WireGuard CLI
+files; normalize that bounded form to44 characters without changing identity.
+Errors name the invalid field/peer without retaining or printing key material.
+Invalid existing private keys fail instead of being replaced. These limits
+bound avoidable serialization/decoding work; Kubernetes Secret/object limits
+and operator workload quotas still govern the enclosing cache and workloads.
+
+### IPsec proposal input budgets
+
+Gateway default proposals are copied into every connection that does not supply
+an override. Limit both lists to 16 entries of at most 512 bytes each, before
+credentials are read or configuration JSON is serialized. Empty lists still
+select the existing defaults. Apply the same budget at gateway/connection
+admission, legacy rendering and appliance startup before kernel or VICI work.
+Reject an oversized list as one bounded diagnostic without echoing its values;
+the budget does not change strongSwan's proposal grammar or select algorithms.
+
+### IPsec credential byte budgets
+
+Referenced Kubernetes Secrets already have an enclosing object limit, but the
+same PSK/password may be copied into many peers in the appliance configuration.
+Limit each raw PSK/EAP password to 4096 bytes before conversion/serialization.
+TLS certificate, private key and CA values must each fit VICI's 16-bit value
+length (65535 bytes). Apply these bounds while reading Secrets and in the
+appliance before kernel/VICI work; check the whole TLS tuple before loading any
+member. Valid bytes are preserved exactly, never truncated or regenerated.
+Rejection messages never contain credential material. Configuration failures
+use the existing owned-workload drain and protected unresolved route intent.
+
+### IPsec identity/address byte budgets
+
+Remote PSK/certificate/EAP identities are bounded to 4096 bytes before exact
+identity parsing, normalization or repetition in config. The gateway's optional
+local identity has the same byte budget (empty still derives from certificate).
+Peer addresses are at most 512 bytes; their existing endpoint semantics stay
+unchanged. Reject oversized values at API admission and legacy rendering before
+credentials, and at appliance startup before kernel/VICI work. Errors identify
+the field or peer without echoing its unbounded value. Preserve existing exact
+identity grammar and canonical duplicate detection within these budgets.
+
+### Remote-prefix admission diagnostics
+
+VPNConnection admission retains the4096 candidate-prefix ceiling and bounds
+each CIDR to64 bytes before parsing. Report the first invalid prefix by index,
+without its raw value, instead of building thousands of errors or copying a
+large malformed value into the API Status message/causes. Both create and
+update reject invalid complete inputs; valid IPv4/IPv6, host bits and mapped
+IPv4 spellings retain their existing behavior. Controller/node budgets remain
+independent of this admission diagnostic bound.
+
+### Pool and mode admission diagnostics
+
+VPNGateway pool validation stops on its first invalid field or overlapping
+pool, without copying pool names, CIDRs, DNS, BGP neighbors or whole HA/spec
+objects into error Status. CIDR/IP text has a 64-byte parsing budget. Invalid
+HA/start-action modes report their allowed values without echoing input.
+VPNConnection conflict/auth/pool errors likewise avoid raw spec values. These
+bounds retain valid pool/DNS/BGP count limits, inclusive overlap rejection and
+all existing valid mode semantics.
+
+### IPsec pool-name transport budget
+
+Pool names are VICI section keys, whose wire length is one byte. Configured
+pool names and optional connection pool references must fit 255 bytes; empty
+references remain allowed. Check the budget at admission, during legacy
+controller preflight before lookup/credentials/JSON, and before appliance
+kernel or VICI work. Reject without echoing oversized names. Existing valid
+names are neither normalized nor regenerated, and a 255-byte name is retained
+exactly.
+### Route ownership during reconciliation
+
+Each VPN status route may carry `vpcRef.name`, naming one of the gateway's
+served VPCs in its namespace. An omitted reference means the primary VPC for
+compatibility. VPCGateway routes continue to use their parent VPC reference.
+Agents validate VPN route references against the gateway's declared VPCs and
+validate each next-hop Port against that same VPC. Missing interfaces retain
+blackhole routes in every served VPC, so an unavailable hub leg cannot turn
+accepted tunnel prefixes into ordinary cleartext NAT egress.
+
+A gateway serves at most ten VPCs. The combined prefix count across all its
+VPCs is bounded by the VPN route budget before configuration is materialized.
+Changing the served VPC set republishes protected intent before credentials
+or appliance configuration are applied; unchanged intent preserves active
+next hops and avoids status churn.

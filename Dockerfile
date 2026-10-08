@@ -25,7 +25,8 @@ RUN CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /ou
     CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-vpn-gateway ./cmd/vpn-gateway && \
     CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-vpn-gateway-ipsec ./cmd/vpn-gateway-ipsec && \
     CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-vpn-routing ./cmd/vpn-routing && \
-    CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-responder ./cmd/responder
+    CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-responder ./cmd/responder && \
+    CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/cozyplane-flowctl ./cmd/flowctl
 
 # Static control-plane services need no networking executables or shell.
 # Keep this optional target before runtime so the default image stays compatible
@@ -69,6 +70,7 @@ COPY --from=build /out/cozyplane-vpn-gateway /usr/local/bin/cozyplane-vpn-gatewa
 COPY --from=build /out/cozyplane-vpn-gateway-ipsec /usr/local/bin/cozyplane-vpn-gateway-ipsec
 COPY --from=build /out/cozyplane-vpn-routing /usr/local/bin/cozyplane-vpn-routing
 COPY --from=build /out/cozyplane-responder /usr/local/bin/cozyplane-responder
+COPY --from=build /out/cozyplane-flowctl /usr/local/bin/cozyplane-flowctl
 COPY --from=build /out/cozyplane /opt/cni/bin/cozyplane
 COPY --from=cni /tmp/cni/bin/host-local /opt/cni/bin/host-local
 COPY --from=cni /tmp/cni/bin/loopback /opt/cni/bin/loopback

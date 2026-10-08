@@ -23,6 +23,7 @@ import (
 	"net"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
+	"github.com/lllamnyp/cozyplane/internal/vpnlimits"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -109,8 +110,48 @@ func (vpnGatewayStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.O
 func validateVPNGateway(gw *sdn.VPNGateway) field.ErrorList {
 	var errs field.ErrorList
 	specPath := field.NewPath("spec")
-	if gw.Spec.VPCRef.Name == "" {
-		errs = append(errs, field.Required(specPath.Child("vpcRef", "name"), "VPC name is required"))
+	if len(gw.Spec.ExternalAddress.AddressClaimNames) > 2 {
+		return field.ErrorList{field.TooMany(specPath.Child("externalAddress", "addressClaimNames"), len(gw.Spec.ExternalAddress.AddressClaimNames), 2)}
+	}
+	errs = append(errs, vpnlimits.ReferenceErrors(gw.Spec.VPCRef.Name, specPath.Child("vpcRef", "name"), true)...)
+	errs = append(errs, vpnlimits.ReferenceErrors(gw.Spec.ExternalAddress.AddressClaimName, specPath.Child("externalAddress", "addressClaimName"), false)...)
+	for i, name := range gw.Spec.ExternalAddress.AddressClaimNames {
+		errs = append(errs, vpnlimits.ReferenceErrors(name, specPath.Child("externalAddress", "addressClaimNames").Index(i), true)...)
+	}
+	if ipsec := gw.Spec.IPsec; ipsec != nil {
+		errs = append(errs, vpnlimits.ReferenceErrors(ipsec.CredentialSecretRef, specPath.Child("ipsec", "credentialSecretRef"), false)...)
+		errs = append(errs, vpnlimits.ReferenceErrors(ipsec.TrustedCASecretRef, specPath.Child("ipsec", "trustedCASecretRef"), false)...)
+	}
+	if ha := gw.Spec.HA; ha != nil && ha.VirtualMachine != nil {
+		vm := ha.VirtualMachine
+		errs = append(errs, vpnlimits.ReferenceErrors(vm.StateClaimName, specPath.Child("ha", "virtualMachine", "stateClaimName"), false)...)
+		errs = append(errs, vpnlimits.ReferenceErrors(vm.CloudInitSecretRef, specPath.Child("ha", "virtualMachine", "cloudInitSecretRef"), false)...)
+	}
+	if len(errs) != 0 {
+		return errs
+	}
+	if ipsec := gw.Spec.IPsec; ipsec != nil {
+		if problem := vpnlimits.IPsecScalarProblem("", ipsec.LocalIdentity); problem != "" {
+			return field.ErrorList{field.Invalid(specPath.Child("ipsec", "localIdentity"), nil, problem)}
+		}
+		if problem := vpnlimits.IPsecProposalProblem(ipsec.Proposals); problem != "" {
+			return field.ErrorList{field.Invalid(specPath.Child("ipsec", "proposals"), nil, problem)}
+		}
+		poolsPath := specPath.Child("ipsec", "addressPools")
+		if len(ipsec.AddressPools) > vpnlimits.AddressPools {
+			return field.ErrorList{field.TooMany(poolsPath, len(ipsec.AddressPools), vpnlimits.AddressPools)}
+		}
+		for i, pool := range ipsec.AddressPools {
+			if problem := vpnlimits.IPsecPoolNameProblem(pool.Name, true); problem != "" {
+				return field.ErrorList{field.Invalid(poolsPath.Index(i).Child("name"), nil, problem)}
+			}
+			if len(pool.DNS) > vpnlimits.PoolDNSServers {
+				return field.ErrorList{field.TooMany(poolsPath.Index(i).Child("dns"), len(pool.DNS), vpnlimits.PoolDNSServers)}
+			}
+		}
+	}
+	if ha := gw.Spec.HA; ha != nil && ha.ActiveActive != nil && len(ha.ActiveActive.PeerAddresses) > vpnlimits.BGPNeighbors {
+		return field.ErrorList{field.TooMany(specPath.Child("ha", "activeActive", "peerAddresses"), len(ha.ActiveActive.PeerAddresses), vpnlimits.BGPNeighbors)}
 	}
 	// AdditionalVPCRefs turn the gateway into a hub serving several same-namespace
 	// VPCs (docs/vpn.md §3.3). The CNI caps attachments at 10 legs total, so at
@@ -119,11 +160,14 @@ func validateVPNGateway(gw *sdn.VPNGateway) field.ErrorList {
 	// with the LiveMigration KubeVirt appliance, which only has one VPC leg.
 	additionalPath := specPath.Child("additionalVPCRefs")
 	if len(gw.Spec.AdditionalVPCRefs) > 9 {
-		errs = append(errs, field.TooMany(additionalPath, len(gw.Spec.AdditionalVPCRefs), 9))
+		return field.ErrorList{field.TooMany(additionalPath, len(gw.Spec.AdditionalVPCRefs), 9)}
 	}
 	additionalNames := map[string]bool{}
 	for i, ref := range gw.Spec.AdditionalVPCRefs {
 		p := additionalPath.Index(i)
+		if !vpnlimits.ObjectName(ref.Name) {
+			return field.ErrorList{field.Invalid(p.Child("name"), nil, "must be a nonempty DNS subdomain name of at most 253 bytes")}
+		}
 		if ref.Name == "" {
 			errs = append(errs, field.Required(p.Child("name"), "VPC name is required"))
 			continue
@@ -148,18 +192,18 @@ func validateVPNGateway(gw *sdn.VPNGateway) field.ErrorList {
 		backends++
 	}
 	if backends > 1 {
-		errs = append(errs, field.Invalid(specPath, gw.Spec, "wireGuard and ipsec are mutually exclusive"))
+		errs = append(errs, field.Invalid(specPath, nil, "wireGuard and ipsec are mutually exclusive"))
 	}
 	haPath := specPath.Child("ha")
 	if gw.Spec.HighAvailability && gw.Spec.HA != nil {
-		errs = append(errs, field.Invalid(haPath, gw.Spec.HA,
+		errs = append(errs, field.Invalid(haPath, nil,
 			"ha and the legacy highAvailability flag are mutually exclusive"))
 	}
 	if ha := gw.Spec.HA; ha != nil {
 		switch ha.Mode {
 		case sdn.VPNGatewayHAModeWarmStandby:
 			if ha.ActiveActive != nil || ha.VirtualMachine != nil {
-				errs = append(errs, field.Invalid(haPath, ha, "WarmStandby accepts no mode-specific configuration"))
+				errs = append(errs, field.Invalid(haPath, nil, "WarmStandby accepts no mode-specific configuration"))
 			}
 		case sdn.VPNGatewayHAModeActiveActive:
 			if ha.ActiveActive == nil {
@@ -198,10 +242,11 @@ func validateVPNGateway(gw *sdn.VPNGateway) field.ErrorList {
 				errs = append(errs, field.Forbidden(haPath.Child("activeActive"), "only valid with ActiveActive"))
 			}
 		default:
-			errs = append(errs, field.NotSupported(haPath.Child("mode"), ha.Mode, []string{
-				string(sdn.VPNGatewayHAModeWarmStandby), string(sdn.VPNGatewayHAModeLiveMigration), string(sdn.VPNGatewayHAModeActiveActive),
-			}))
+			errs = append(errs, field.Invalid(haPath.Child("mode"), nil, "must be WarmStandby, LiveMigration or ActiveActive"))
 		}
+	}
+	if len(errs) != 0 {
+		return errs
 	}
 	if ipsec := gw.Spec.IPsec; ipsec != nil {
 		poolsPath := specPath.Child("ipsec", "addressPools")
@@ -210,28 +255,28 @@ func validateVPNGateway(gw *sdn.VPNGateway) field.ErrorList {
 		for i, pool := range ipsec.AddressPools {
 			p := poolsPath.Index(i)
 			if pool.Name == "" {
-				errs = append(errs, field.Required(p.Child("name"), "pool name is required"))
+				return field.ErrorList{field.Required(p.Child("name"), "pool name is required")}
 			} else if previous, exists := names[pool.Name]; exists {
-				errs = append(errs, field.Duplicate(p.Child("name"),
-					fmt.Sprintf("%s (already used at index %d)", pool.Name, previous)))
+				return field.ErrorList{field.Invalid(p.Child("name"), nil, fmt.Sprintf("already used at index %d", previous))}
 			} else {
 				names[pool.Name] = i
 			}
+			if len(pool.CIDR) > vpnlimits.RoutePrefixBytes {
+				return field.ErrorList{field.Invalid(p.Child("cidr"), nil, "must contain at most 64 bytes")}
+			}
 			_, network, err := net.ParseCIDR(pool.CIDR)
 			if err != nil {
-				errs = append(errs, field.Invalid(p.Child("cidr"), pool.CIDR, "must be a valid CIDR"))
-				continue
+				return field.ErrorList{field.Invalid(p.Child("cidr"), nil, "must be a valid CIDR")}
 			}
 			for j, other := range parsed {
 				if network.Contains(other.IP) || other.Contains(network.IP) {
-					errs = append(errs, field.Invalid(p.Child("cidr"), pool.CIDR,
-						fmt.Sprintf("overlaps addressPools[%d]", j)))
+					return field.ErrorList{field.Invalid(p.Child("cidr"), nil, fmt.Sprintf("overlaps addressPools[%d]", j))}
 				}
 			}
 			parsed = append(parsed, network)
 			for j, dns := range pool.DNS {
-				if net.ParseIP(dns) == nil {
-					errs = append(errs, field.Invalid(p.Child("dns").Index(j), dns, "must be an IP address"))
+				if len(dns) > vpnlimits.RoutePrefixBytes || net.ParseIP(dns) == nil {
+					return field.ErrorList{field.Invalid(p.Child("dns").Index(j), nil, "must be an IP address of at most 64 bytes")}
 				}
 			}
 		}
@@ -256,8 +301,8 @@ func validateActiveActive(aa *sdn.VPNGatewayActiveActive, path *field.Path) fiel
 		errs = append(errs, field.Required(path.Child("peerAddresses"), "at least one BGP neighbor is required"))
 	}
 	for i, address := range aa.PeerAddresses {
-		if net.ParseIP(address) == nil {
-			errs = append(errs, field.Invalid(path.Child("peerAddresses").Index(i), address, "must be an IP address"))
+		if len(address) > vpnlimits.RoutePrefixBytes || net.ParseIP(address) == nil {
+			return field.ErrorList{field.Invalid(path.Child("peerAddresses").Index(i), nil, "must be an IP address of at most 64 bytes")}
 		}
 	}
 	return errs

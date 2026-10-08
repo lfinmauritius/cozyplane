@@ -91,6 +91,12 @@ type overlayBridgeEp struct {
 	VpcIp overlayAddr128
 }
 
+type overlayBridgeOwner struct {
+	_       structs.HostLayout
+	Ifindex uint32
+	Sandbox [32]uint8
+}
+
 type overlayCozyMac struct {
 	_    structs.HostLayout
 	Addr [6]uint8
@@ -140,6 +146,8 @@ type overlayEndpoint struct {
 	Ifindex uint32
 	Mac     [6]uint8
 	Pad     [2]uint8
+	_       [4]byte
+	SgOwner [4]uint64
 }
 
 type overlayExtEgress struct {
@@ -154,6 +162,33 @@ type overlayFloatNet struct {
 	_    structs.HostLayout
 	Base uint32
 	Mask uint32
+}
+
+type overlayFlowKey struct {
+	_      structs.HostLayout
+	Srcnet uint32
+	Dstnet uint32
+	Src    overlayAddr128
+	Dst    overlayAddr128
+	Sport  uint16
+	Dport  uint16
+	Proto  uint8
+	Pad    [3]uint8
+}
+
+type overlayFlowScratchVal struct {
+	_   structs.HostLayout
+	K   overlayFlowKey
+	Fl  uint8
+	Pad [7]uint8
+}
+
+type overlayFwdCidrKey struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	ScopeNet  uint32
+	Family    uint32
+	Addr      overlayAddr128
 }
 
 type overlayGwEntry struct {
@@ -281,6 +316,11 @@ type overlayRouteEntry struct {
 	Pad      [7]uint8
 }
 
+type overlayRouteScopeGuard struct {
+	_       structs.HostLayout
+	Blocked [128]uint32
+}
+
 type overlaySgCidrKey struct {
 	_         structs.HostLayout
 	Prefixlen uint32
@@ -309,6 +349,12 @@ type overlaySgEgressKey struct {
 	Pad    [3]uint8
 }
 
+type overlaySgMember struct {
+	_      structs.HostLayout
+	Groups uint64
+	Owner  [4]uint64
+}
+
 type overlaySgRuleKey struct {
 	_      structs.HostLayout
 	Net    uint32
@@ -317,6 +363,22 @@ type overlaySgRuleKey struct {
 	Port   uint16
 	Proto  uint8
 	Pad    [3]uint8
+}
+
+type overlaySgScratchVal struct {
+	_ structs.HostLayout
+	Q struct {
+		_      structs.HostLayout
+		Dst    overlayLocalKey
+		SrcNet uint32
+		Srcmap uint64
+		Dport  uint16
+		Proto  uint8
+		Pad    [1]uint8
+		_      [4]byte
+	}
+	Ck overlaySgCidrKey
+	_  [4]byte
 }
 
 type overlaySvcFwdKey struct {
@@ -379,6 +441,30 @@ type overlaySvcVal struct {
 	}
 }
 
+type overlayTunnelScratch struct {
+	_   structs.HostLayout
+	Key struct {
+		_           structs.HostLayout
+		TunnelId    uint32
+		RemoteIpv4  uint32
+		_           [12]byte
+		TunnelTos   uint8
+		TunnelTtl   uint8
+		TunnelExt   uint16
+		TunnelLabel uint32
+		LocalIpv4   uint32
+		_           [12]byte
+	}
+	Option struct {
+		_        structs.HostLayout
+		OptClass uint16
+		Type     uint8
+		Length   uint8
+		SrcNet   uint32
+		Srcmap   uint64
+	}
+}
+
 type overlayVpcCounter struct {
 	_         structs.HostLayout
 	TxPackets uint64
@@ -408,6 +494,7 @@ const (
 	overlayMapBoundaryPrimary           = "boundary_primary"
 	overlayMapBoundaryRules             = "boundary_rules"
 	overlayMapBoundaryScratch           = "boundary_scratch"
+	overlayMapBridgeOwners              = "bridge_owners"
 	overlayMapBridges                   = "bridges"
 	overlayMapCtFwd                     = "ct_fwd"
 	overlayMapCtRev                     = "ct_rev"
@@ -419,12 +506,17 @@ const (
 	overlayMapFloatUplinkMac            = "float_uplink_mac"
 	overlayMapFloating                  = "floating"
 	overlayMapFloatingEgress            = "floating_egress"
+	overlayMapFlowEvents                = "flow_events"
+	overlayMapFlowLost                  = "flow_lost"
+	overlayMapFlowScratch               = "flow_scratch"
+	overlayMapFlowSeen                  = "flow_seen"
 	overlayMapFwdCidrs                  = "fwd_cidrs"
 	overlayMapGateways                  = "gateways"
 	overlayMapHfAllow                   = "hf_allow"
 	overlayMapHfCt                      = "hf_ct"
 	overlayMapHfDrops                   = "hf_drops"
 	overlayMapHfEallow                  = "hf_eallow"
+	overlayMapHfModes                   = "hf_modes"
 	overlayMapHfSelf                    = "hf_self"
 	overlayMapInternal                  = "internal"
 	overlayMapLbProg                    = "lb_prog"
@@ -445,19 +537,24 @@ const (
 	overlayMapNpIdent                   = "np_ident"
 	overlayMapNpNodes                   = "np_nodes"
 	overlayMapNpScratch                 = "np_scratch"
+	overlayMapOverlayNodes              = "overlay_nodes"
 	overlayMapParams                    = "params"
 	overlayMapPeers                     = "peers"
 	overlayMapPorts                     = "ports"
 	overlayMapRemotes                   = "remotes"
+	overlayMapRouteGuard                = "route_guard"
+	overlayMapRouteScopes               = "route_scopes"
 	overlayMapSgCidr                    = "sg_cidr"
 	overlayMapSgDrops                   = "sg_drops"
 	overlayMapSgEgress                  = "sg_egress"
 	overlayMapSgEgressCidr              = "sg_egress_cidr"
 	overlayMapSgMembers                 = "sg_members"
 	overlayMapSgRules                   = "sg_rules"
+	overlayMapSgScratch                 = "sg_scratch"
 	overlayMapSvcFwd                    = "svc_fwd"
 	overlayMapSvcRev                    = "svc_rev"
 	overlayMapSvcVips                   = "svc_vips"
+	overlayMapTunnelScratch             = "tunnel_scratch"
 	overlayMapUplinkMac                 = "uplink_mac"
 	overlayMapVpcCounters               = "vpc_counters"
 	overlayMapVpcIngress                = "vpc_ingress"
@@ -539,6 +636,7 @@ type overlayMapSpecs struct {
 	BoundaryPrimary *ebpf.MapSpec `ebpf:"boundary_primary"`
 	BoundaryRules   *ebpf.MapSpec `ebpf:"boundary_rules"`
 	BoundaryScratch *ebpf.MapSpec `ebpf:"boundary_scratch"`
+	BridgeOwners    *ebpf.MapSpec `ebpf:"bridge_owners"`
 	Bridges         *ebpf.MapSpec `ebpf:"bridges"`
 	CtFwd           *ebpf.MapSpec `ebpf:"ct_fwd"`
 	CtRev           *ebpf.MapSpec `ebpf:"ct_rev"`
@@ -550,12 +648,17 @@ type overlayMapSpecs struct {
 	FloatUplinkMac  *ebpf.MapSpec `ebpf:"float_uplink_mac"`
 	Floating        *ebpf.MapSpec `ebpf:"floating"`
 	FloatingEgress  *ebpf.MapSpec `ebpf:"floating_egress"`
+	FlowEvents      *ebpf.MapSpec `ebpf:"flow_events"`
+	FlowLost        *ebpf.MapSpec `ebpf:"flow_lost"`
+	FlowScratch     *ebpf.MapSpec `ebpf:"flow_scratch"`
+	FlowSeen        *ebpf.MapSpec `ebpf:"flow_seen"`
 	FwdCidrs        *ebpf.MapSpec `ebpf:"fwd_cidrs"`
 	Gateways        *ebpf.MapSpec `ebpf:"gateways"`
 	HfAllow         *ebpf.MapSpec `ebpf:"hf_allow"`
 	HfCt            *ebpf.MapSpec `ebpf:"hf_ct"`
 	HfDrops         *ebpf.MapSpec `ebpf:"hf_drops"`
 	HfEallow        *ebpf.MapSpec `ebpf:"hf_eallow"`
+	HfModes         *ebpf.MapSpec `ebpf:"hf_modes"`
 	HfSelf          *ebpf.MapSpec `ebpf:"hf_self"`
 	Internal        *ebpf.MapSpec `ebpf:"internal"`
 	LbProg          *ebpf.MapSpec `ebpf:"lb_prog"`
@@ -576,19 +679,24 @@ type overlayMapSpecs struct {
 	NpIdent         *ebpf.MapSpec `ebpf:"np_ident"`
 	NpNodes         *ebpf.MapSpec `ebpf:"np_nodes"`
 	NpScratch       *ebpf.MapSpec `ebpf:"np_scratch"`
+	OverlayNodes    *ebpf.MapSpec `ebpf:"overlay_nodes"`
 	Params          *ebpf.MapSpec `ebpf:"params"`
 	Peers           *ebpf.MapSpec `ebpf:"peers"`
 	Ports           *ebpf.MapSpec `ebpf:"ports"`
 	Remotes         *ebpf.MapSpec `ebpf:"remotes"`
+	RouteGuard      *ebpf.MapSpec `ebpf:"route_guard"`
+	RouteScopes     *ebpf.MapSpec `ebpf:"route_scopes"`
 	SgCidr          *ebpf.MapSpec `ebpf:"sg_cidr"`
 	SgDrops         *ebpf.MapSpec `ebpf:"sg_drops"`
 	SgEgress        *ebpf.MapSpec `ebpf:"sg_egress"`
 	SgEgressCidr    *ebpf.MapSpec `ebpf:"sg_egress_cidr"`
 	SgMembers       *ebpf.MapSpec `ebpf:"sg_members"`
 	SgRules         *ebpf.MapSpec `ebpf:"sg_rules"`
+	SgScratch       *ebpf.MapSpec `ebpf:"sg_scratch"`
 	SvcFwd          *ebpf.MapSpec `ebpf:"svc_fwd"`
 	SvcRev          *ebpf.MapSpec `ebpf:"svc_rev"`
 	SvcVips         *ebpf.MapSpec `ebpf:"svc_vips"`
+	TunnelScratch   *ebpf.MapSpec `ebpf:"tunnel_scratch"`
 	UplinkMac       *ebpf.MapSpec `ebpf:"uplink_mac"`
 	VpcCounters     *ebpf.MapSpec `ebpf:"vpc_counters"`
 	VpcIngress      *ebpf.MapSpec `ebpf:"vpc_ingress"`
@@ -628,6 +736,7 @@ type overlayMaps struct {
 	BoundaryPrimary *ebpf.Map `ebpf:"boundary_primary"`
 	BoundaryRules   *ebpf.Map `ebpf:"boundary_rules"`
 	BoundaryScratch *ebpf.Map `ebpf:"boundary_scratch"`
+	BridgeOwners    *ebpf.Map `ebpf:"bridge_owners"`
 	Bridges         *ebpf.Map `ebpf:"bridges"`
 	CtFwd           *ebpf.Map `ebpf:"ct_fwd"`
 	CtRev           *ebpf.Map `ebpf:"ct_rev"`
@@ -639,12 +748,17 @@ type overlayMaps struct {
 	FloatUplinkMac  *ebpf.Map `ebpf:"float_uplink_mac"`
 	Floating        *ebpf.Map `ebpf:"floating"`
 	FloatingEgress  *ebpf.Map `ebpf:"floating_egress"`
+	FlowEvents      *ebpf.Map `ebpf:"flow_events"`
+	FlowLost        *ebpf.Map `ebpf:"flow_lost"`
+	FlowScratch     *ebpf.Map `ebpf:"flow_scratch"`
+	FlowSeen        *ebpf.Map `ebpf:"flow_seen"`
 	FwdCidrs        *ebpf.Map `ebpf:"fwd_cidrs"`
 	Gateways        *ebpf.Map `ebpf:"gateways"`
 	HfAllow         *ebpf.Map `ebpf:"hf_allow"`
 	HfCt            *ebpf.Map `ebpf:"hf_ct"`
 	HfDrops         *ebpf.Map `ebpf:"hf_drops"`
 	HfEallow        *ebpf.Map `ebpf:"hf_eallow"`
+	HfModes         *ebpf.Map `ebpf:"hf_modes"`
 	HfSelf          *ebpf.Map `ebpf:"hf_self"`
 	Internal        *ebpf.Map `ebpf:"internal"`
 	LbProg          *ebpf.Map `ebpf:"lb_prog"`
@@ -665,19 +779,24 @@ type overlayMaps struct {
 	NpIdent         *ebpf.Map `ebpf:"np_ident"`
 	NpNodes         *ebpf.Map `ebpf:"np_nodes"`
 	NpScratch       *ebpf.Map `ebpf:"np_scratch"`
+	OverlayNodes    *ebpf.Map `ebpf:"overlay_nodes"`
 	Params          *ebpf.Map `ebpf:"params"`
 	Peers           *ebpf.Map `ebpf:"peers"`
 	Ports           *ebpf.Map `ebpf:"ports"`
 	Remotes         *ebpf.Map `ebpf:"remotes"`
+	RouteGuard      *ebpf.Map `ebpf:"route_guard"`
+	RouteScopes     *ebpf.Map `ebpf:"route_scopes"`
 	SgCidr          *ebpf.Map `ebpf:"sg_cidr"`
 	SgDrops         *ebpf.Map `ebpf:"sg_drops"`
 	SgEgress        *ebpf.Map `ebpf:"sg_egress"`
 	SgEgressCidr    *ebpf.Map `ebpf:"sg_egress_cidr"`
 	SgMembers       *ebpf.Map `ebpf:"sg_members"`
 	SgRules         *ebpf.Map `ebpf:"sg_rules"`
+	SgScratch       *ebpf.Map `ebpf:"sg_scratch"`
 	SvcFwd          *ebpf.Map `ebpf:"svc_fwd"`
 	SvcRev          *ebpf.Map `ebpf:"svc_rev"`
 	SvcVips         *ebpf.Map `ebpf:"svc_vips"`
+	TunnelScratch   *ebpf.Map `ebpf:"tunnel_scratch"`
 	UplinkMac       *ebpf.Map `ebpf:"uplink_mac"`
 	VpcCounters     *ebpf.Map `ebpf:"vpc_counters"`
 	VpcIngress      *ebpf.Map `ebpf:"vpc_ingress"`
@@ -693,6 +812,7 @@ func (m *overlayMaps) Close() error {
 		m.BoundaryPrimary,
 		m.BoundaryRules,
 		m.BoundaryScratch,
+		m.BridgeOwners,
 		m.Bridges,
 		m.CtFwd,
 		m.CtRev,
@@ -704,12 +824,17 @@ func (m *overlayMaps) Close() error {
 		m.FloatUplinkMac,
 		m.Floating,
 		m.FloatingEgress,
+		m.FlowEvents,
+		m.FlowLost,
+		m.FlowScratch,
+		m.FlowSeen,
 		m.FwdCidrs,
 		m.Gateways,
 		m.HfAllow,
 		m.HfCt,
 		m.HfDrops,
 		m.HfEallow,
+		m.HfModes,
 		m.HfSelf,
 		m.Internal,
 		m.LbProg,
@@ -730,19 +855,24 @@ func (m *overlayMaps) Close() error {
 		m.NpIdent,
 		m.NpNodes,
 		m.NpScratch,
+		m.OverlayNodes,
 		m.Params,
 		m.Peers,
 		m.Ports,
 		m.Remotes,
+		m.RouteGuard,
+		m.RouteScopes,
 		m.SgCidr,
 		m.SgDrops,
 		m.SgEgress,
 		m.SgEgressCidr,
 		m.SgMembers,
 		m.SgRules,
+		m.SgScratch,
 		m.SvcFwd,
 		m.SvcRev,
 		m.SvcVips,
+		m.TunnelScratch,
 		m.UplinkMac,
 		m.VpcCounters,
 		m.VpcIngress,

@@ -51,6 +51,7 @@ func NewREST(scheme *runtime.Scheme, optsGetter generic.RESTOptionsGetter, auth 
 		TableConvertor: rest.NewDefaultTableConvertor(sdn.Resource("vpcs")),
 	}
 
+	registry.InstallMetadataValidation(store)
 	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: GetAttrs}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, nil, err

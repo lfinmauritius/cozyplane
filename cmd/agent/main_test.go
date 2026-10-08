@@ -17,13 +17,105 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	corefake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
+	sdnfake "github.com/lllamnyp/cozyplane/pkg/generated/sdn/clientset/versioned/fake"
 )
+
+func TestSeverFinalizerRetainedOnCurrentPortLookupFailure(t *testing.T) {
+	port := &sdnv1alpha1.Port{
+		ObjectMeta: metav1.ObjectMeta{Name: "v101.10-0-0-2", UID: "port-uid", DeletionTimestamp: new(metav1.Now()), Finalizers: []string{sdnv1alpha1.FinalizerSever}},
+		Spec:       sdnv1alpha1.PortSpec{IP: "10.0.0.2", PodNamespace: "tenant", PodName: "workload"},
+	}
+	sdn := sdnfake.NewSimpleClientset(port)
+	core := corefake.NewClientset()
+	failedRead := false
+	sdn.PrependReactor("get", "ports", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if failedRead {
+			return false, nil, nil
+		}
+		failedRead = true
+		return true, nil, fmt.Errorf("temporary API failure")
+	})
+	releaseSeveredPort(t.Context(), sdn, core, nil, port, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !failedRead || len(core.Actions()) != 0 {
+		t.Fatal("failed current-Port confirmation continued cleanup")
+	}
+	latest, err := sdn.SdnV1alpha1().Ports().Get(t.Context(), port.Name, metav1.GetOptions{})
+	if err != nil || len(latest.Finalizers) != 1 || latest.Finalizers[0] != sdnv1alpha1.FinalizerSever {
+		t.Fatalf("sever finalizer lost after failed cleanup: port=%v err=%v", latest, err)
+	}
+	for _, action := range sdn.Actions() {
+		if action.GetVerb() == "update" {
+			t.Fatal("acknowledged an unsuccessful sever")
+		}
+	}
+}
+
+func TestSeverIgnoresEventForReplacedPortUID(t *testing.T) {
+	old := &sdnv1alpha1.Port{ObjectMeta: metav1.ObjectMeta{Name: "v101.10-0-0-2", UID: "old", DeletionTimestamp: new(metav1.Now()), Finalizers: []string{sdnv1alpha1.FinalizerSever}}, Spec: sdnv1alpha1.PortSpec{PodNamespace: "tenant", PodName: "pod"}}
+	current := old.DeepCopy()
+	current.UID = "current"
+	sdn := sdnfake.NewSimpleClientset(current)
+	core := corefake.NewClientset()
+	releaseSeveredPort(t.Context(), sdn, core, nil, old, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if len(core.Actions()) != 0 {
+		t.Fatal("stale event attempted to sever current sandbox")
+	}
+	got, err := sdn.SdnV1alpha1().Ports().Get(t.Context(), current.Name, metav1.GetOptions{})
+	if err != nil || got.UID != current.UID || len(got.Finalizers) != 1 {
+		t.Fatal("stale event changed replacement Port", got, err)
+	}
+}
+
+func TestEnsureCNIConf(t *testing.T) {
+	t.Run("disabled leaves CNI directory untouched", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "not-created")
+		if _, err := configureCNIConf(dir, "10-cozyplane.conflist", 1450, false); err != nil {
+			t.Fatalf("ensureCNIConf disabled: %v", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("disabled CNI writer created %q or returned an unexpected stat error: %v", dir, err)
+		}
+	})
+
+	t.Run("enabled writes a valid standalone conflist", func(t *testing.T) {
+		dir := t.TempDir()
+		name := "10-cozyplane.conflist"
+		if _, err := configureCNIConf(dir, name, 1400, true); err != nil {
+			t.Fatalf("ensureCNIConf enabled: %v", err)
+		}
+		body, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read conflist: %v", err)
+		}
+		var conf struct {
+			Plugins []struct {
+				Type string `json:"type"`
+				MTU  int    `json:"mtu"`
+			} `json:"plugins"`
+		}
+		if err := json.Unmarshal(body, &conf); err != nil {
+			t.Fatalf("decode conflist: %v", err)
+		}
+		if len(conf.Plugins) != 1 || conf.Plugins[0].Type != "cozyplane" || conf.Plugins[0].MTU != 1400 {
+			t.Fatalf("unexpected conflist: %+v", conf)
+		}
+	})
+}
 
 func half(ns, name, localVPC, peerNS, peerVPC string) *sdnv1alpha1.VPCPeering {
 	return &sdnv1alpha1.VPCPeering{
@@ -66,7 +158,13 @@ func TestDesiredGateways(t *testing.T) {
 		gatewayPort("v101.10-70-0-2", "10.70.0.2", "other", "10.4.0.2", false), // tenant port: ignored
 		gatewayPort("bogus", "10.72.0.1", "self", "10.4.0.1", true),            // unparsable name: ignored
 	}
-	got := desiredGateways(ports, "self")
+	vpcs := []*sdnv1alpha1.VPC{vpcObj("tenant-a", "net-a", 101), vpcObj("tenant-a", "net-b", 102)}
+	for _, p := range ports {
+		p.Spec.VPCRef = sdnv1alpha1.VPCRef{Namespace: "tenant-a", Name: "net-a"}
+	}
+	ports[1].Spec.VPCRef.Name = "net-b"
+	gws := []*sdnv1alpha1.VPCGateway{fallbackBoundary(vpcs[0], "10.70.0.0/24"), fallbackBoundary(vpcs[1], "10.71.0.0/24")}
+	got := desiredGateways(ports, vpcs, gws, "self")
 	if len(got) != 2 {
 		t.Fatalf("got %d gateways, want 2: %+v", len(got), got)
 	}
@@ -92,10 +190,10 @@ func TestDesiredFloating(t *testing.T) {
 	fips := []*sdnv1alpha1.FloatingIP{
 		floatingIPObj("team-a", "web", "vpc-a", "10.0.0.5", "203.0.113.7"),   // target here
 		floatingIPObj("team-a", "api", "vpc-a", "10.0.0.6", "203.0.113.8"),   // target elsewhere: still programmed
-		floatingIPObj("team-a", "unset", "vpc-a", "10.0.0.5", ""),            // no address yet: skipped
+		floatingIPObj("team-a", "unset", "vpc-a", "10.0.0.7", ""),            // no address yet: skipped
 		floatingIPObj("team-a", "nopod", "vpc-a", "10.0.0.9", "203.0.113.9"), // no live Port: skipped
 	}
-	got := desiredFloating(fips, ports)
+	got := desiredFloating(fips, ports, []*sdnv1alpha1.VPC{{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "vpc-a"}, Status: sdnv1alpha1.VPCStatus{VNI: 101}}})
 	if len(got) != 2 {
 		t.Fatalf("got %d, want 2: %+v", len(got), got)
 	}
@@ -106,6 +204,76 @@ func TestDesiredFloating(t *testing.T) {
 	// carries that node — from_uplink needs it to forward over the overlay.
 	if v, ok := got["203.0.113.8"]; !ok || v.vpcIP != "10.0.0.6" || v.node != "other" {
 		t.Errorf("203.0.113.8 = %+v (ok=%v), want {10.0.0.6 101 other}", v, ok)
+	}
+}
+
+func TestDesiredFloatingRejectsTerminatingTarget(t *testing.T) {
+	port := vpcPort("v101.10-0-0-5", "tenant-a", "net", "10.0.0.5", "node-a")
+	now := metav1.Now()
+	port.DeletionTimestamp = &now
+	fip := floatingIPObj("tenant-a", "public", "net", port.Spec.IP, "203.0.113.10")
+	got := desiredFloating([]*sdnv1alpha1.FloatingIP{fip}, []*sdnv1alpha1.Port{port}, []*sdnv1alpha1.VPC{{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "net"}, Status: sdnv1alpha1.VPCStatus{VNI: 101}}})
+	if len(got) != 0 {
+		t.Fatalf("terminating target still published: %+v", got)
+	}
+}
+
+func TestDesiredFloatingRequiresCurrentVPCClaim(t *testing.T) {
+	for _, mutation := range []string{"old-vni", "wrong-address", "missing-vpc", "terminating-vpc", "terminating-fip"} {
+		t.Run(mutation, func(t *testing.T) {
+			port := vpcPort("v101.10-0-0-5", "tenant-a", "net", "10.0.0.5", "node-a")
+			vpc := &sdnv1alpha1.VPC{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "net"}, Status: sdnv1alpha1.VPCStatus{VNI: 101}}
+			fip := floatingIPObj(vpc.Namespace, "public", vpc.Name, port.Spec.IP, "203.0.113.10")
+			vpcs := []*sdnv1alpha1.VPC{vpc}
+			switch mutation {
+			case "old-vni":
+				vpc.Status.VNI = 102
+			case "wrong-address":
+				port.Spec.IP = "10.0.0.99"
+				fip.Spec.Target = port.Spec.IP
+			case "missing-vpc":
+				vpcs = nil
+			case "terminating-vpc":
+				now := metav1.Now()
+				vpc.DeletionTimestamp = &now
+			case "terminating-fip":
+				now := metav1.Now()
+				fip.DeletionTimestamp = &now
+			}
+			if got := desiredFloating([]*sdnv1alpha1.FloatingIP{fip}, []*sdnv1alpha1.Port{port}, vpcs); len(got) != 0 {
+				t.Fatalf("stale target projected: %+v", got)
+			}
+		})
+	}
+}
+
+func TestDesiredFloatingHonorsExclusiveTarget(t *testing.T) {
+	for _, pendingWinner := range []bool{false, true} {
+		t.Run(map[bool]string{false: "assigned-winner", true: "pending-winner"}[pendingWinner], func(t *testing.T) {
+			port := vpcPort("v101.10-0-0-5", "tenant-a", "net", "10.0.0.5", "node-a")
+			vpc := &sdnv1alpha1.VPC{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "net"}, Status: sdnv1alpha1.VPCStatus{VNI: 101}}
+			winner := floatingIPObj(vpc.Namespace, "a-winner", vpc.Name, port.Spec.IP, "203.0.113.10")
+			loser := floatingIPObj(vpc.Namespace, "z-loser", vpc.Name, port.Spec.IP, "203.0.113.11")
+			if pendingWinner {
+				winner.Status.Address = ""
+			}
+			for _, fips := range [][]*sdnv1alpha1.FloatingIP{{winner, loser}, {loser, winner}} {
+				got := desiredFloating(fips, []*sdnv1alpha1.Port{port}, []*sdnv1alpha1.VPC{vpc})
+				if _, exists := got[loser.Status.Address]; exists {
+					t.Fatalf("loser stale address projected: %+v", got)
+				}
+				if (pendingWinner && len(got) != 0) || (!pendingWinner && len(got) != 1) {
+					t.Fatalf("invalid winner projection: %+v", got)
+				}
+			}
+			// Deletion must promote the successor, independently of stale status.
+			now := metav1.Now()
+			winner.DeletionTimestamp = &now
+			got := desiredFloating([]*sdnv1alpha1.FloatingIP{winner, loser}, []*sdnv1alpha1.Port{port}, []*sdnv1alpha1.VPC{vpc})
+			if len(got) != 1 || got[loser.Status.Address].vni != 101 {
+				t.Fatalf("successor not promoted: %+v", got)
+			}
+		})
 	}
 }
 
@@ -320,5 +488,21 @@ func TestDesiredPeerLinksCarryBothAddressFamilies(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing dual-stack routes: %+v", want)
+	}
+}
+
+func TestSeverFinalizerCannotAcknowledgeAnotherNode(t *testing.T) {
+	old := &sdnv1alpha1.Port{ObjectMeta: metav1.ObjectMeta{Name: "v101.10-0-0-2", UID: "same-uid", DeletionTimestamp: new(metav1.Now()), Finalizers: []string{sdnv1alpha1.FinalizerSever}}, Spec: sdnv1alpha1.PortSpec{IP: "10.0.0.2", Node: "source", PodNamespace: "tenant", PodName: "workload"}}
+	current := old.DeepCopy()
+	current.Spec.Node = "target"
+	sdn := sdnfake.NewSimpleClientset(current)
+	core := corefake.NewClientset()
+	releaseSeveredPort(t.Context(), sdn, core, nil, old, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if len(core.Actions()) != 0 {
+		t.Fatal("old source attempted to sever target sandbox")
+	}
+	got, err := sdn.SdnV1alpha1().Ports().Get(t.Context(), old.Name, metav1.GetOptions{})
+	if err != nil || len(got.Finalizers) != 1 {
+		t.Fatal("source acknowledged target revocation", got, err)
 	}
 }

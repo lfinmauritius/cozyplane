@@ -86,7 +86,7 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
@@ -118,6 +118,10 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if !enableLeaderElection {
+		setupLog.Error(fmt.Errorf("leader election is required for unique tenant network and group allocation"), "unsafe controller configuration")
+		os.Exit(1)
+	}
 
 	var tlsOpts []func(*tls.Config)
 	if !enableHTTP2 {
@@ -140,11 +144,12 @@ func main() {
 	restCfg := ctrl.GetConfigOrDie()
 
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "sdn-controller.cozystack.io",
+		Scheme:                  scheme,
+		Metrics:                 metricsServerOptions,
+		HealthProbeBindAddress:  probeAddr,
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        controllerLeaderElectionID,
+		LeaderElectionNamespace: controllerLeaderElectionNamespace,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -177,6 +182,7 @@ func main() {
 	// cluster with no aggregated apiserver at all.
 	if err := (&localsdnctrl.FabricIPReconciler{
 		Client: mgr.GetClient(),
+		Reader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "FabricIP")
 		os.Exit(1)
@@ -272,6 +278,7 @@ func setupSDNControllers(mgr manager.Manager, cfg sdnControllerConfig) error {
 	if err := (&sdncontroller.VPCBindingReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Reader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller %s: %w", "VPCBinding", err)
 	}
@@ -303,6 +310,7 @@ func setupSDNControllers(mgr manager.Manager, cfg sdnControllerConfig) error {
 	if err := (&sdncontroller.PersistentPortReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Reader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller %s: %w", "PersistentPort", err)
 	}
@@ -330,8 +338,9 @@ func setupSDNControllers(mgr manager.Manager, cfg sdnControllerConfig) error {
 	}
 
 	if err := (&sdncontroller.VPCGatewayReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		InternalCIDRs: parseCIDRs(cfg.internalCIDRs),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller %s: %w", "VPCGateway", err)
 	}
@@ -416,3 +425,8 @@ func parseCIDRs(s string) []*net.IPNet {
 	}
 	return out
 }
+
+const (
+	controllerLeaderElectionID        = "sdn-controller.cozystack.io"
+	controllerLeaderElectionNamespace = "kube-system"
+)

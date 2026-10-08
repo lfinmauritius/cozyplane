@@ -24,13 +24,16 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	corefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
 	localv1alpha1 "github.com/lllamnyp/cozyplane/api/localsdn/v1alpha1"
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
 	"github.com/lllamnyp/cozyplane/datapath"
+	"github.com/lllamnyp/cozyplane/internal/vmidentity"
 	localfake "github.com/lllamnyp/cozyplane/pkg/generated/localsdn/clientset/versioned/fake"
 	sdnfake "github.com/lllamnyp/cozyplane/pkg/generated/sdn/clientset/versioned/fake"
 )
@@ -262,6 +265,40 @@ func TestClaimIP_IPv6(t *testing.T) {
 	}
 }
 
+func TestClaimIPRejectsPlatformIdentities(t *testing.T) {
+	for _, address := range []string{"169.254.1.1", "169.254.42.1", "fe80::1", "fe80::2a:1", "64:ff9b::a9fe:101", "64:ff9b::a9fe:2a01"} {
+		cidr := "169.254.0.0/16"
+		if isV6(net.ParseIP(address)) {
+			cidr = "::/0"
+		}
+		client := sdnfake.NewSimpleClientset()
+		vpc := newVPC("tenant", "net", 100, cidr)
+		if _, _, _, _, err := attachPort(t.Context(), client, res(vpc, "tenant", withIP(address)), &datapath.AgentState{NodeName: "node"}, "tenant", "pod", "uid", "", ""); err == nil {
+			t.Errorf("allocated reserved platform identity %s", address)
+		}
+		claims, err := client.SdnV1alpha1().Ports().List(t.Context(), metav1.ListOptions{})
+		if err != nil || len(claims.Items) != 0 {
+			t.Fatal("rejected request created a claim", claims, err)
+		}
+	}
+}
+
+func TestPortAllocatorSkipsReservedCandidate(t *testing.T) {
+	client := sdnfake.NewSimpleClientset()
+	paginateTestCNIClaims(t, client)
+	vpc := newVPC("tenant", "net", 100, "169.254.40.0/22")
+	for address := net.ParseIP("169.254.40.2"); !address.Equal(net.ParseIP("169.254.42.1")); address = nextIP(address) {
+		port := &sdnv1alpha1.Port{ObjectMeta: metav1.ObjectMeta{Name: portName(100, address.String()), Labels: map[string]string{labelVPCNamespace: "tenant", labelVPC: "net"}}, Spec: sdnv1alpha1.PortSpec{IP: address.String()}}
+		if err := client.Tracker().Add(port); err != nil {
+			t.Fatal(err)
+		}
+	}
+	address, _, _, _, err := attachPort(t.Context(), client, res(vpc, "tenant"), &datapath.AgentState{NodeName: "node"}, "tenant", "pod", "uid", "", "")
+	if err != nil || address.String() != "169.254.42.2" {
+		t.Fatal("reserved address assigned instead of adjacent usable address", address, err)
+	}
+}
+
 func TestClaimIP_SkipsUsedAddresses(t *testing.T) {
 	client := sdnfake.NewSimpleClientset()
 	vpc := newVPC("team-a", "tenant-a", 100, "10.10.0.0/24")
@@ -357,6 +394,51 @@ func TestRequireVPCBinding(t *testing.T) {
 	}
 }
 
+func TestTerminatingBindingCannotGrantAttachment(t *testing.T) {
+	now := metav1.Now()
+	b := &sdnv1alpha1.VPCBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "revoked", Namespace: "consumer", DeletionTimestamp: &now},
+		Spec:       sdnv1alpha1.VPCBindingSpec{VPCRef: sdnv1alpha1.VPCRef{Namespace: "owner", Name: "vpc"}, AllowForwarding: true},
+	}
+	client := sdnfake.NewSimpleClientset(b)
+	if _, _, err := requireVPCBinding(t.Context(), client, "consumer", "owner", "vpc"); err == nil {
+		t.Fatal("terminating binding granted attachment")
+	}
+}
+
+func TestPodLookupFailsClosed(t *testing.T) {
+	client := corefake.NewClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "workload", UID: "current"}})
+	if pod, err := lookupPod(t.Context(), client, "tenant", "missing", "old"); err == nil || pod != nil {
+		t.Fatal("missing pod granted an attachment")
+	}
+	if pod, err := lookupPod(t.Context(), client, "tenant", "workload", "old"); err == nil || pod != nil {
+		t.Fatal("name-reused pod granted an attachment")
+	}
+	if pod, err := lookupPod(t.Context(), client, "tenant", "workload", "current"); err != nil || pod == nil {
+		t.Fatalf("current pod denied: %v", err)
+	}
+}
+
+func TestVMPortCannotBeReboundAcrossConsumerNamespaces(t *testing.T) {
+	vpc := newVPC("owner", "shared", 100, "10.10.0.0/24")
+	foreign := &sdnv1alpha1.Port{
+		ObjectMeta: metav1.ObjectMeta{Name: "v100.10-10-0-10", Labels: map[string]string{labelVPCNamespace: "owner", labelVPC: "shared", labelVMName: "same-vm", labelVMNIC: "0", labelPodNS: "consumer-a"}},
+		Spec:       sdnv1alpha1.PortSpec{VPCRef: sdnv1alpha1.VPCRef{Namespace: "owner", Name: "shared"}, PodNamespace: "consumer-a", PodName: "original", IP: "10.10.0.10", MAC: "02:00:00:00:00:aa"},
+	}
+	client := sdnfake.NewSimpleClientset(foreign)
+	ip, _, _, bound, err := attachPort(t.Context(), client, res(vpc, "owner"), &datapath.AgentState{NodeName: "node", NodeIP: "192.0.2.1"}, "consumer-b", "launcher", "pod-uid", "same-vm", `{"kubevirt.io/created-by":"vmi-current"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound || ip.Equal(net.ParseIP(foreign.Spec.IP)) {
+		t.Fatal("another namespace's VM port was reused")
+	}
+	got, err := client.SdnV1alpha1().Ports().Get(t.Context(), foreign.Name, metav1.GetOptions{})
+	if err != nil || got.Spec.PodNamespace != "consumer-a" || got.Spec.PodName != "original" {
+		t.Fatalf("foreign VM identity changed: %v %v", got, err)
+	}
+}
+
 // The forwarding grant's SCOPE (issue #6) is a security control: a blanket
 // grant (allowForwarding, no CIDRs) must win over a scoped one, so a later
 // binding can never silently narrow an earlier owner's grant — the union is the
@@ -432,12 +514,12 @@ func TestReleaseFabricIPsRunsAfterTheOperationContextDied(t *testing.T) {
 			Name:   localv1alpha1.FabricIPName("10.244.0.7"),
 			Labels: map[string]string{labelFabricPodUID: "uid-1"},
 		},
-		Spec: localv1alpha1.FabricIPSpec{Address: "10.244.0.7", PodUID: "uid-1"},
+		Spec: localv1alpha1.FabricIPSpec{Address: "10.244.0.7", PodUID: "uid-1", ContainerID: "sandbox-1", IfName: "eth0"},
 	})
 	var issued []string
-	client.PrependReactor("delete-collection", "fabricips",
+	client.PrependReactor("delete", "fabricips",
 		func(a k8stesting.Action) (bool, runtime.Object, error) {
-			issued = append(issued, a.(k8stesting.DeleteCollectionActionImpl).ListRestrictions.Labels.String())
+			issued = append(issued, a.(k8stesting.DeleteAction).GetName())
 			return true, nil, nil
 		})
 
@@ -456,13 +538,15 @@ func TestReleaseFabricIPsRunsAfterTheOperationContextDied(t *testing.T) {
 		t.Fatal("cleanup context has no deadline: a rollback could hang forever")
 	}
 
-	releaseFabricIPs(cctx, client, "uid-1")
+	if err := releaseFabricIPs(cctx, client, "uid-1", "sandbox-1", "eth0", nil); err != nil {
+		t.Fatal(err)
+	}
 
 	if len(issued) != 1 {
-		t.Fatalf("release issued %d delete-collection calls against a dead parent, want 1", len(issued))
+		t.Fatalf("release issued %d individual delete calls against a dead parent, want 1", len(issued))
 	}
-	if !strings.Contains(issued[0], "uid-1") {
-		t.Errorf("release selector = %q, want it scoped to the pod UID", issued[0])
+	if issued[0] != localv1alpha1.FabricIPName("10.244.0.7") {
+		t.Errorf("release name = %q, want the sandbox claim", issued[0])
 	}
 }
 
@@ -562,15 +646,18 @@ func TestAttachPortMultiNICVMBindsThePortForItsInterface(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "v100." + strings.ReplaceAll(ip, ".", "-"),
 				Labels: map[string]string{
-					labelVPCNamespace: "team-a",
-					labelVPC:          "tenant-a",
-					labelVMName:       "vm1",
-					labelVMNIC:        strconv.Itoa(nic),
+					labelVPCNamespace:           "team-a",
+					labelVPC:                    "tenant-a",
+					labelVMName:                 "vm1",
+					vmidentity.InstanceUIDLabel: "vmi-current",
+					labelVMNIC:                  strconv.Itoa(nic),
+					labelPodNS:                  "team-a",
 				},
 			},
 			Spec: sdnv1alpha1.PortSpec{
-				VPCRef: sdnv1alpha1.VPCRef{Namespace: "team-a", Name: "tenant-a"},
-				IP:     ip, MAC: mac, Node: "node1", NodeIP: "192.0.2.1",
+				VPCRef:       sdnv1alpha1.VPCRef{Namespace: "team-a", Name: "tenant-a"},
+				PodNamespace: "team-a",
+				IP:           ip, MAC: mac, Node: "node1", NodeIP: "192.0.2.1",
 			},
 		}
 	}
@@ -587,7 +674,7 @@ func TestAttachPortMultiNICVMBindsThePortForItsInterface(t *testing.T) {
 		{1, "10.10.0.11", "02:00:00:00:00:bb"},
 	} {
 		ip, mac, _, bound, err := attachPort(t.Context(), client,
-			res(vpc, "team-a", withIndex(c.nic)), state, "team-a", "virt-launcher-vm1", "uid-l1", "vm1", "")
+			res(vpc, "team-a", withIndex(c.nic)), state, "team-a", "virt-launcher-vm1", "uid-l1", "vm1", `{"kubevirt.io/created-by":"vmi-current"}`)
 		if err != nil {
 			t.Fatalf("nic %d: %v", c.nic, err)
 		}

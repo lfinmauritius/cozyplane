@@ -66,6 +66,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &sdnv1alpha1.SecurityGroupApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("SecurityGroupEgressRule"):
 		return &sdnv1alpha1.SecurityGroupEgressRuleApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("SecurityGroupMembership"):
+		return &sdnv1alpha1.SecurityGroupMembershipApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("SecurityGroupPeer"):
 		return &sdnv1alpha1.SecurityGroupPeerApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("SecurityGroupPort"):

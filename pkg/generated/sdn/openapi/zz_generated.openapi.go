@@ -53,6 +53,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroup":            schema_cozyplane_api_sdn_v1alpha1_SecurityGroup(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupEgressRule":  schema_cozyplane_api_sdn_v1alpha1_SecurityGroupEgressRule(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupList":        schema_cozyplane_api_sdn_v1alpha1_SecurityGroupList(ref),
+		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupMembership":  schema_cozyplane_api_sdn_v1alpha1_SecurityGroupMembership(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupPeer":        schema_cozyplane_api_sdn_v1alpha1_SecurityGroupPeer(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupPort":        schema_cozyplane_api_sdn_v1alpha1_SecurityGroupPort(ref),
 		"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupRule":        schema_cozyplane_api_sdn_v1alpha1_SecurityGroupRule(ref),
@@ -999,7 +1000,7 @@ func schema_cozyplane_api_sdn_v1alpha1_PortStatus(ref common.ReferenceCallback) 
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Groups is the set of SecurityGroup numeric ids (1..62, within the Port's VPC) this Port is a member of, resolved by the controller from the pod's labels. The agent folds it into the datapath membership bitmap. Empty means \"no groups\" — legacy allow-all intra-VPC ingress. [0] alone means a selected SG is pending/invalid: deny new SG-gated TCP/UDP admissions until all selected group IDs are resolved. It is not full protocol quarantine. All agents must support this before activation.",
+							Description: "Groups is the set of SecurityGroup numeric ids (1..62, within the Port's VPC) this Port is a member of, resolved by the controller from the pod's labels. The agent folds it into the datapath membership bitmap. Empty means \"no groups\" — legacy allow-all intra-VPC ingress. Zero denotes a selected group awaiting allocation: default-deny without granting rules. Resolved groups still union their permissions normally.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -1012,9 +1013,37 @@ func schema_cozyplane_api_sdn_v1alpha1_PortStatus(ref common.ReferenceCallback) 
 							},
 						},
 					},
+					"groupRefs": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "GroupRefs proves the current SecurityGroup UID behind each allocated ID.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupMembership"),
+									},
+								},
+							},
+						},
+					},
+					"groupPodUID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "GroupPodUID identifies the pod whose labels resolved this membership.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroupMembership"},
 	}
 }
 
@@ -1153,6 +1182,34 @@ func schema_cozyplane_api_sdn_v1alpha1_SecurityGroupList(ref common.ReferenceCal
 		},
 		Dependencies: []string{
 			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.SecurityGroup", v1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_cozyplane_api_sdn_v1alpha1_SecurityGroupMembership(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "SecurityGroupMembership prevents a recycled numeric ID from granting the permissions of a replacement group to predecessor Ports.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"id": {
+						SchemaProps: spec.SchemaProps{
+							Default: 0,
+							Type:    []string{"integer"},
+							Format:  "int32",
+						},
+					},
+					"uid": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+				},
+				Required: []string{"id", "uid"},
+			},
+		},
 	}
 }
 
@@ -2343,6 +2400,13 @@ func schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRouteStatus(ref common.Referenc
 				Description: "VPCGatewayRouteStatus reports one resolved route.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"vpcRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "VPCRef scopes a VPN route to a declared same-namespace served VPC. Empty means the parent gateway's primary VPC. VPCGateway ignores it.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef"),
+						},
+					},
 					"cidrs": {
 						VendorExtensible: spec.VendorExtensible{
 							Extensions: spec.Extensions{
@@ -2394,6 +2458,8 @@ func schema_cozyplane_api_sdn_v1alpha1_VPCGatewayRouteStatus(ref common.Referenc
 				Required: []string{"cidrs"},
 			},
 		},
+		Dependencies: []string{
+			"github.com/lllamnyp/cozyplane/api/sdn/v1alpha1.LocalVPCRef"},
 	}
 }
 
@@ -3010,6 +3076,13 @@ func schema_cozyplane_api_sdn_v1alpha1_VPNConnectionIPsec(ref common.ReferenceCa
 					"peerAddress": {
 						SchemaProps: spec.SchemaProps{
 							Description: "PeerAddress is the remote IKE endpoint (host or IP). Required for the initiator side; a responder-only peer may leave it empty.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"remoteIdentity": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RemoteIdentity binds a PSK to this exact IKE identity. When omitted, an IP-valued PeerAddress supplies the identity. Required for PSK responders without a fixed IP endpoint and for endpoints named by DNS.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

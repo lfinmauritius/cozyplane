@@ -246,6 +246,10 @@ type VPCGatewayStatus struct {
 
 // VPCGatewayRouteStatus reports one resolved route.
 type VPCGatewayRouteStatus struct {
+	// VPCRef scopes a VPN route to a declared same-namespace served VPC.
+	// Empty means the parent gateway's primary VPC. VPCGateway ignores it.
+	// +optional
+	VPCRef LocalVPCRef `json:"vpcRef,omitempty"`
 	// CIDRs echoes the spec route's prefixes.
 	// +listType=atomic
 	CIDRs []string `json:"cidrs"`

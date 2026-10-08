@@ -23,6 +23,7 @@ import (
 	"net"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
+	"github.com/lllamnyp/cozyplane/internal/ipam"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -98,6 +99,9 @@ func (serviceVIPStrategy) Validate(ctx context.Context, obj runtime.Object) fiel
 		errs = append(errs, field.Invalid(field.NewPath("spec", "ip"), svip.Spec.IP,
 			"must be an IP address in canonical form"))
 		return errs
+	}
+	if ipam.IsReserved(ip) {
+		errs = append(errs, field.Invalid(field.NewPath("spec", "ip"), svip.Spec.IP, "reserved platform bridge or hairpin address"))
 	}
 	vni, _, ok := sdn.ParseClaim(sdn.ClaimPrefixServiceVIP, svip.Name)
 	if !ok {

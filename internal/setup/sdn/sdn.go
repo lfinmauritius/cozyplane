@@ -92,6 +92,9 @@ func APIGroupInfo(scheme *runtime.Scheme, codec serializer.CodecFactory, restOpt
 	}
 	portTwin.Exists = claim.StoreExists(serviceVIPREST.Store)
 	vipTwin.Exists = claim.StoreExists(portREST.Store)
+	if err := claim.Install(portREST.Store, serviceVIPREST.Store, restOptionsGetter); err != nil {
+		panic(err)
+	}
 	securityGroupREST, securityGroupStatusREST, err := securitygroupstorage.NewREST(scheme, restOptionsGetter, auth)
 	if err != nil {
 		panic(err)

@@ -32,7 +32,6 @@ import (
 	"fmt"
 	"github.com/lllamnyp/cozyplane/pkg/netid"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -42,10 +41,10 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
-	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -55,6 +54,9 @@ import (
 	"github.com/lllamnyp/cozyplane/api/sdn"
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
 	"github.com/lllamnyp/cozyplane/datapath"
+	"github.com/lllamnyp/cozyplane/internal/ipam"
+	"github.com/lllamnyp/cozyplane/internal/podlabels"
+	"github.com/lllamnyp/cozyplane/internal/vmidentity"
 	sdnclientset "github.com/lllamnyp/cozyplane/pkg/generated/sdn/clientset/versioned"
 )
 
@@ -85,8 +87,8 @@ const (
 // host-side veth via proxy_arp (Calico-style point-to-point veth). linkLocalGWv6
 // is its IPv6 counterpart for v6 VPC pods, answered via proxy_ndp.
 var (
-	linkLocalGW   = net.IPv4(169, 254, 1, 1)
-	linkLocalGWv6 = net.ParseIP("fe80::1")
+	linkLocalGW   = net.ParseIP(ipam.BridgeIPv4)
+	linkLocalGWv6 = net.ParseIP(ipam.BridgeIPv6)
 )
 
 // isV6 reports whether ip is an IPv6 address (not a v4 or v4-in-v6).
@@ -214,10 +216,24 @@ func coreClient() (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(cfg)
 }
 
+func lookupPod(ctx context.Context, core kubernetes.Interface, namespace, name, uid string) (*corev1.Pod, error) {
+	pod, err := core.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("resolve pod attachment: %w", err)
+	}
+	if pod.UID == "" || (uid != "" && string(pod.UID) != uid) || pod.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("pod identity changed or is terminating")
+	}
+	return pod, nil
+}
+
 func cmdAdd(args *skel.CmdArgs) error {
 	ctx, cancel := operationContext()
 	defer cancel()
+	return withSandboxLock(ctx, sandboxLockDir, args.ContainerID, args.IfName, func() error { return addSandbox(ctx, args) })
+}
 
+func addSandbox(ctx context.Context, args *skel.CmdArgs) error {
 	conf, err := loadConf(args.StdinData)
 	if err != nil {
 		return err
@@ -227,33 +243,48 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	// Resolve VPC membership from the pod annotations (best-effort: if the API
-	// is unreachable, fall back to the default network). A virt-launcher pod also
+	// Resolve membership from the actual pod. An unreadable pod must not turn
+	// an isolated VPC attachment into an attachment to the default network.
+	// A virt-launcher pod also
 	// carries its VM name, which keys the persistent Port (VPC IP + MAC that
 	// survive live migration).
 	vpcAnno, networksAnno, gwAnno, vmName, podLabels := "", "", "", "", ""
-	if core, e := coreClient(); e == nil && podNS != "" && podName != "" {
-		if pod, e := core.CoreV1().Pods(podNS).Get(ctx, podName, metav1.GetOptions{}); e == nil {
-			vpcAnno = pod.Annotations[vpcAnnotation]
-			networksAnno = pod.Annotations[networksAnnotation]
-			gwAnno = pod.Annotations[gatewayAnnotation]
-			vmName = pod.Labels[sdnv1alpha1.KubeVirtLabelVMName]
-			// Snapshot the pod's labels for SecurityGroup membership: the
-			// controller resolves Port.status.groups from this claim-time copy.
-			if len(pod.Labels) > 0 {
-				if b, e := json.Marshal(pod.Labels); e == nil {
-					podLabels = string(b)
-				}
-			}
+	if podNS == "" || podName == "" {
+		return fmt.Errorf("Kubernetes pod namespace and name are required")
+	}
+	core, e := coreClient()
+	if e != nil {
+		return fmt.Errorf("initialize pod lookup: %w", e)
+	}
+	pod, e := lookupPod(ctx, core, podNS, podName, podUID)
+	if e != nil {
+		return e
+	}
+	podUID = string(pod.UID)
+	vpcAnno = pod.Annotations[vpcAnnotation]
+	networksAnno = pod.Annotations[networksAnnotation]
+	gwAnno = pod.Annotations[gatewayAnnotation]
+	vmName = pod.Labels[sdnv1alpha1.KubeVirtLabelVMName]
+	if vmName != "" {
+		dynamic, err := dynamicClient()
+		if err != nil {
+			return fmt.Errorf("initialize VMI lookup: %w", err)
+		}
+		vmName, err = verifiedVMName(ctx, pod, dynamic)
+		if err != nil {
+			return err
 		}
 	}
-
 	// A Multus delegate realizes ONE named VPC on CNI_IFNAME. It must not fall
 	// into the annotation path, which derives its own interface names and builds
 	// the whole list (docs/kubevirt-multi-nic.md).
 	if conf.VPC != "" {
 		if gwAnno != "" {
 			return fmt.Errorf("%s and a delegated vpc are mutually exclusive: a gateway pod lives on the default network", gatewayAnnotation)
+		}
+		podLabels, err = podlabels.Encode(pod.Labels)
+		if err != nil {
+			return err
 		}
 		return addDelegate(ctx, args, conf, networksAnno, podNS, podName, podUID, vmName, podLabels)
 	}
@@ -266,9 +297,13 @@ func cmdAdd(args *skel.CmdArgs) error {
 		if gwAnno != "" {
 			return fmt.Errorf("%s and %s are mutually exclusive: a gateway pod lives on the default network", vpcAnnotation, gatewayAnnotation)
 		}
+		podLabels, err = podlabels.Encode(pod.Labels)
+		if err != nil {
+			return err
+		}
 		return addVPCs(ctx, args, conf, atts, podNS, podName, podUID, vmName, podLabels)
 	}
-	result, err := addDefault(ctx, args, conf)
+	result, err := addDefault(ctx, args, conf, podNS, podName, podUID)
 	if err != nil {
 		return err
 	}
@@ -292,10 +327,10 @@ func parseVPCRef(anno, podNS string) (ns, name string) {
 	return podNS, anno
 }
 
-// addDefault attaches the pod to the default/system network with host-local
+// addDefault attaches the pod to the default/system network with FabricIP
 // IPAM and returns the CNI result (the caller prints it — a gateway pod adds
 // its VPC leg first).
-func addDefault(ctx context.Context, args *skel.CmdArgs, conf *NetConf) (result *current.Result, err error) {
+func addDefault(ctx context.Context, args *skel.CmdArgs, conf *NetConf, podNS, podName, podUID string) (result *current.Result, err error) {
 	state, err := datapath.LoadAgentState()
 	if err != nil {
 		return nil, err
@@ -305,10 +340,6 @@ func addDefault(ctx context.Context, args *skel.CmdArgs, conf *NetConf) (result 
 		mtu = state.MTU
 	}
 
-	podNS, podName, podUID, err := podIdentity(args)
-	if err != nil {
-		return nil, err
-	}
 	lc, err := localClient()
 	if err != nil {
 		return nil, err
@@ -318,7 +349,7 @@ func addDefault(ctx context.Context, args *skel.CmdArgs, conf *NetConf) (result 
 	// the FLAT cluster-wide pool — a pod's address has nothing to do with which
 	// node it landed on. The claim is a FabricIP object: atomic by name,
 	// GC-able by the controller (docs/api-groups.md).
-	podIPs, err := claimFabricIPs(ctx, lc, poolFor(state), state.NodeName, podNS, podName, podUID)
+	allocation, err := claimFabricIPs(ctx, lc, poolFor(state), state.NodeName, podNS, podName, podUID, args.ContainerID, args.IfName)
 	if err != nil {
 		return nil, err
 	}
@@ -329,13 +360,11 @@ func addDefault(ctx context.Context, args *skel.CmdArgs, conf *NetConf) (result 
 			// would ever see that kubelet's retries are burning addresses.
 			cctx, ccancel := cleanupContext(ctx)
 			defer ccancel()
-			if rerr := releaseFabricIPs(cctx, lc, podUID); rerr != nil {
-				err = fmt.Errorf("%w (releasing the fabric IP claim also failed: %v — "+
-					"the address leaks until the pod is deleted)", err, rerr)
-			}
+			err = errors.Join(err, releaseFabricClaims(cctx, lc, allocation.Created, nil))
 		}
 	}()
 
+	podIPs := allocation.Addresses
 	result, _, err = setupVeth(args, conf.CNIVersion, podIPs, nil, mtu, 0)
 	if err != nil {
 		return nil, err
@@ -373,6 +402,9 @@ type resolvedAttachment struct {
 	// admits a foreign source only within these prefixes (PORT_F_FWD_SCOPED +
 	// the fwd_cidrs allowlist); nil means the legacy blanket grant.
 	forwardingCIDRs []string
+	containerID     string
+	cniIfName       string
+	portIdentity    datapath.PortVethIdentity
 }
 
 // addVPCs attaches the pod to every VPC it asked for, using the dual-address
@@ -405,12 +437,9 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 		if e != nil {
 			return e
 		}
-		vpc, e := client.SdnV1alpha1().VPCs(a.VPCNamespace).Get(ctx, a.VPCName, metav1.GetOptions{})
+		vpc, e := lookupAttachmentVPC(ctx, client, a.VPCNamespace, a.VPCName)
 		if e != nil {
-			return fmt.Errorf("get vpc %s/%s: %w", a.VPCNamespace, a.VPCName, e)
-		}
-		if !netid.ValidVNI(vpc.Status.VNI) {
-			return fmt.Errorf("vpc %s/%s is not ready (no VNI assigned yet)", a.VPCNamespace, a.VPCName)
+			return e
 		}
 		if len(vpc.Spec.CIDRs) == 0 {
 			return fmt.Errorf("vpc %s/%s has no CIDR", a.VPCNamespace, a.VPCName)
@@ -419,7 +448,7 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 		if e != nil {
 			return fmt.Errorf("vpc %s/%s CIDR: %w", a.VPCNamespace, a.VPCName, e)
 		}
-		resolved = append(resolved, resolvedAttachment{attachment: a, vpc: vpc, cidr: cidr, forwarding: forwarding, forwardingCIDRs: fwdCIDRs})
+		resolved = append(resolved, resolvedAttachment{attachment: a, vpc: vpc, cidr: cidr, forwarding: forwarding, forwardingCIDRs: fwdCIDRs, containerID: args.ContainerID, cniIfName: args.IfName})
 	}
 	primary := resolved[0]
 
@@ -444,8 +473,8 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 	if err != nil {
 		return err
 	}
-	fabricIPs, err := claimFabricIPs(ctx, lc, poolOfFamily(poolFor(state), wantV6),
-		state.NodeName, podNS, podName, podUID)
+	allocation, err := claimFabricIPs(ctx, lc, poolOfFamily(poolFor(state), wantV6),
+		state.NodeName, podNS, podName, podUID, args.ContainerID, args.IfName)
 	if err != nil {
 		return err
 	}
@@ -456,24 +485,23 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 			// would ever see that kubelet's retries are burning addresses.
 			cctx, ccancel := cleanupContext(ctx)
 			defer ccancel()
-			if rerr := releaseFabricIPs(cctx, lc, podUID); rerr != nil {
-				err = fmt.Errorf("%w (releasing the fabric IP claim also failed: %v — "+
-					"the address leaks until the pod is deleted)", err, rerr)
-			}
+			err = errors.Join(err, releaseFabricClaims(cctx, lc, allocation.Created, func(address string) error {
+				return datapath.DelSandboxBridge(address, hostVethNameFor(args.ContainerID), args.ContainerID, args.IfName)
+			}))
 		}
 	}()
-	fabricIP := fabricIPs[0]
+	fabricIP := allocation.Addresses[0]
 
 	// Ports WE created, in order, so a failure half-way through releases exactly
 	// what it claimed. A bound (persistent VM) Port is never ours to delete —
 	// that is the whole point of it outliving the pod.
-	var ours []string
+	var ours []*sdnv1alpha1.Port
 	defer func() {
 		if err != nil {
 			cctx, ccancel := cleanupContext(ctx)
 			defer ccancel()
-			for _, name := range ours {
-				_ = client.SdnV1alpha1().Ports().Delete(cctx, name, metav1.DeleteOptions{})
+			for _, port := range ours {
+				_ = deleteClaimedPort(cctx, client, port)
 			}
 		}
 	}()
@@ -486,7 +514,12 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 			return err
 		}
 		if !bound {
-			ours = append(ours, port.Name)
+			// recordPortSandbox updates this object after our own successful patch.
+			// Keep that version for rollback; a later external rebind must conflict.
+			ours = append(ours, port)
+		}
+		if e := recordPortSandbox(ctx, client, port, args.ContainerID, args.IfName, r.Primary(), state.NodeName); e != nil {
+			return e
 		}
 
 		// The ports-map value carries the net id and, for a granted forwarding
@@ -500,6 +533,7 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 			}
 		}
 		hostVeth := hostVethNameForIndex(args.ContainerID, r.Index)
+		r.portIdentity = datapath.PortVethIdentity{UID: string(port.UID), Staged: bound && port.Spec.Node != "" && port.Spec.Node != state.NodeName}
 		podMAC, e := setupAttachment(args, r, hostVeth, vpcIP, podMACPinned, mtu, netID)
 		if e != nil {
 			err = e
@@ -530,18 +564,6 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 			}
 		}
 
-		// Staged locals (live-migration overlap window): a migration target binds
-		// the persistent Port while the VM is still ACTIVE on another node. Local
-		// delivery must keep following the active location until cutover, or a
-		// client co-located with the target would be delivered into the
-		// not-yet-running VM. Everything else is staged now; the agent programs
-		// locals from the veth's alias record when cutover re-points spec.node.
-		if bound && port.Spec.Node != "" && port.Spec.Node != state.NodeName {
-			if e := datapath.DelLocal(netid.VNI(r.vpc.Status.VNI), vpcIP); e != nil {
-				err = e
-				return err
-			}
-		}
 	}
 
 	// Report the fabric IP as status.podIP (host mask for its family), against
@@ -566,7 +588,7 @@ func setupAttachment(args *skel.CmdArgs, r resolvedAttachment, hostVethName stri
 
 	var podMAC net.HardwareAddr
 	if err := ns.WithNetNSPath(args.Netns, func(ns.NetNS) error {
-		if _, _, e := ip.SetupVethWithName(r.IfName, hostVethName, mtu, "", hostNS); e != nil {
+		if e := setupSandboxVeth(args.ContainerID, args.IfName, r.IfName, hostVethName, mtu, hostNS); e != nil {
 			return e
 		}
 		link, e := netlink.LinkByName(r.IfName)
@@ -596,7 +618,7 @@ func setupAttachment(args *skel.CmdArgs, r resolvedAttachment, hostVethName stri
 	}); err != nil {
 		return nil, err
 	}
-	return podMAC, configureHostVeth(hostVethName, []net.IP{vpcIP}, netID, podMAC, r.forwardingCIDRs)
+	return podMAC, configureHostVeth(hostVethName, []net.IP{vpcIP}, netID, podMAC, r.forwardingCIDRs, args.ContainerID, args.IfName, r.portIdentity)
 }
 
 // addGatewayLeg gives a (default-network) gateway pod a second interface into
@@ -619,24 +641,20 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 	if err != nil {
 		return fmt.Errorf("sdn client: %w", err)
 	}
-	vpc, err := client.SdnV1alpha1().VPCs(vpcNS).Get(ctx, vpcName, metav1.GetOptions{})
+	vpc, err := lookupAttachmentVPC(ctx, client, vpcNS, vpcName)
 	if err != nil {
-		return fmt.Errorf("get vpc %s/%s: %w", vpcNS, vpcName, err)
+		return err
 	}
 	// The VPC's owner must have opened a door: a VPCGateway naming this VPC, with
 	// NAT enabled. Not a field on the VPC any more — the boundary is a separate,
 	// grantable object (docs/north-south.md). The VPC's boundary is its OLDEST
 	// gateway; a second one realizes nothing.
-	gws, err := client.SdnV1alpha1().VPCGateways(vpcNS).List(ctx, metav1.ListOptions{})
+	gw, err := lookupEffectiveGateway(ctx, client, vpcNS, vpcName)
 	if err != nil {
 		return fmt.Errorf("list vpcgateways in %s: %w", vpcNS, err)
 	}
-	gw := sdnv1alpha1.EffectiveGateway(gws.Items, vpcName)
 	if gw == nil || !gw.Spec.NAT.Enabled {
 		return fmt.Errorf("vpc %s/%s has no gateway with NAT enabled (create a VPCGateway)", vpcNS, vpcName)
-	}
-	if !netid.ValidVNI(vpc.Status.VNI) {
-		return fmt.Errorf("vpc %s/%s is not ready (no VNI assigned yet)", vpcNS, vpcName)
 	}
 	if len(vpc.Spec.CIDRs) == 0 {
 		return fmt.Errorf("vpc %s/%s has no CIDR", vpcNS, vpcName)
@@ -646,13 +664,17 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 		return fmt.Errorf("parse vpc CIDR: %w", err)
 	}
 	gwIP := nextIP(cloneIP(ipnet.IP)) // the reserved .1
+	if !ipnet.Contains(gwIP) || ipam.IsReserved(gwIP) {
+		return fmt.Errorf("VPC gateway address %s is outside its CIDR or reserved for the platform", gwIP)
+	}
 
 	// Claim the gateway Port. AlreadyExists means another gateway pod still
 	// holds the .1 (e.g. its teardown hasn't run yet); kubelet retries ADD.
 	port := &sdnv1alpha1.Port{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       portName(vpc.Status.VNI, gwIP.String()),
-			Finalizers: []string{sdnv1alpha1.FinalizerSever},
+			Name:        portName(vpc.Status.VNI, gwIP.String()),
+			Annotations: map[string]string{sdnv1alpha1.AnnotationContainerID: args.ContainerID, sdnv1alpha1.AnnotationCNIIfName: args.IfName},
+			Finalizers:  []string{sdnv1alpha1.FinalizerSever},
 			Labels: map[string]string{
 				labelVPCNamespace: vpcNS,
 				labelVPC:          vpc.Name,
@@ -672,14 +694,21 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 		},
 	}
 	created, err := client.SdnV1alpha1().Ports().Create(ctx, port, metav1.CreateOptions{})
+	newClaim := err == nil
+	if apierrors.IsAlreadyExists(err) {
+		created, err = client.SdnV1alpha1().Ports().Get(ctx, port.Name, metav1.GetOptions{})
+		if err == nil && (!portOwnedBySandbox(created, args.ContainerID, args.IfName) || created.Labels[labelPodUID] != podUID || created.DeletionTimestamp != nil || created.Spec != port.Spec) {
+			err = fmt.Errorf("gateway Port belongs to another sandbox")
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("claim gateway port %s: %w", port.Name, err)
 	}
 	defer func() {
-		if err != nil {
+		if err != nil && newClaim {
 			cctx, ccancel := cleanupContext(ctx)
 			defer ccancel()
-			_ = client.SdnV1alpha1().Ports().Delete(cctx, created.Name, metav1.DeleteOptions{})
+			_ = deleteClaimedPort(cctx, client, created)
 		}
 	}()
 
@@ -700,11 +729,11 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 	var hostVethName string
 	var podMAC net.HardwareAddr
 	if err = ns.WithNetNSPath(args.Netns, func(ns.NetNS) error {
-		hostVeth, _, e := ip.SetupVethWithName(gwVethName, gwHostVethNameFor(args.ContainerID), mtu, "", hostNS)
+		e := setupSandboxVeth(args.ContainerID, args.IfName, gwVethName, gwHostVethNameFor(args.ContainerID), mtu, hostNS)
 		if e != nil {
 			return e
 		}
-		hostVethName = hostVeth.Name
+		hostVethName = gwHostVethNameFor(args.ContainerID)
 		link, e := netlink.LinkByName(gwVethName)
 		if e != nil {
 			return e
@@ -714,7 +743,7 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 		if gwIsV6 {
 			gwAddr.Flags = unix.IFA_F_NODAD
 		}
-		if e := netlink.AddrAdd(link, gwAddr); e != nil {
+		if e := netlink.AddrAdd(link, gwAddr); e != nil && !isExist(e) {
 			return fmt.Errorf("add gateway address: %w", e)
 		}
 		if e := netlink.LinkSetUp(link); e != nil {
@@ -734,7 +763,9 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 			Gw:        hop,
 			Flags:     int(netlink.FLAG_ONLINK),
 		}); e != nil {
-			return fmt.Errorf("add VPC route: %w", e)
+			if !isExist(e) {
+				return fmt.Errorf("add VPC route: %w", e)
+			}
 		}
 		// The gateway forwards between its legs — both families; a v6 VPC's
 		// gateway still egresses over its dual-stack default-network leg.
@@ -755,7 +786,7 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 
 	// Host side is a normal VPC port, flagged as the gateway leg so the
 	// datapath blesses the off-VPC sources it forwards inward.
-	return configureHostVeth(hostVethName, []net.IP{gwIP}, netid.VNI(vpc.Status.VNI)|datapath.PortGatewayFlag, podMAC, nil)
+	return configureHostVeth(hostVethName, []net.IP{gwIP}, uint32(vpc.Status.VNI)|datapath.PortGatewayFlag, podMAC, nil, args.ContainerID, args.IfName, datapath.PortVethIdentity{UID: string(created.UID)})
 }
 
 // requireVPCBinding implements default-deny attachment: a VPCBinding in the
@@ -777,36 +808,25 @@ func addGatewayLeg(ctx context.Context, args *skel.CmdArgs, conf *NetConf, vpcNS
 // declared no CIDRs, and a blanket grant must not be silently narrowed by
 // another's CIDRs (the union is the most permissive, as for allowForwarding).
 func requireVPCBinding(ctx context.Context, client sdnclientset.Interface, podNS, vpcNS, vpcName string) (allowForwarding bool, fwdCIDRs []string, err error) {
-	list, err := client.SdnV1alpha1().VPCBindings(podNS).List(ctx, metav1.ListOptions{})
+	grant := sdnv1alpha1.NewBindingGrantAccumulator(podNS, vpcNS, vpcName)
+	err = ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.VPCBinding, string, error) {
+		list, err := client.SdnV1alpha1().VPCBindings(podNS).List(ctx, metav1.ListOptions{Limit: limit, Continue: token})
+		if err != nil {
+			return nil, "", err
+		}
+		return list.Items, list.Continue, nil
+	}, grant.Add)
 	if err != nil {
 		return false, nil, fmt.Errorf("list vpcbindings in %q: %w", podNS, err)
 	}
-	found := false
-	blanket := false // a granting binding with no CIDRs
-	scopedCIDRs := []string{}
-	for i := range list.Items {
-		ref := list.Items[i].Spec.VPCRef
-		if ref.Namespace != vpcNS || ref.Name != vpcName {
-			continue
-		}
-		found = true
-		if !list.Items[i].Spec.AllowForwarding {
-			continue
-		}
-		allowForwarding = true
-		if len(list.Items[i].Spec.ForwardingCIDRs) == 0 {
-			blanket = true
-		} else {
-			scopedCIDRs = append(scopedCIDRs, list.Items[i].Spec.ForwardingCIDRs...)
-		}
+	found, allow, cidrs, err := grant.Result()
+	if err != nil {
+		return false, nil, err
 	}
 	if !found {
 		return false, nil, fmt.Errorf("no VPCBinding in namespace %q authorizes attaching to VPC %s/%s (default-deny)", podNS, vpcNS, vpcName)
 	}
-	if allowForwarding && !blanket {
-		return true, scopedCIDRs, nil
-	}
-	return allowForwarding, nil, nil
+	return allow, cidrs, nil
 }
 
 // rebindPodIdentity re-points a reused persistent Port at the pod binding it
@@ -821,6 +841,8 @@ func rebindPodIdentity(ctx context.Context, client sdnclientset.Interface, p *sd
 	}
 	patch := map[string]any{
 		"metadata": map[string]any{
+			"uid":             p.UID,
+			"resourceVersion": p.ResourceVersion,
 			"labels": map[string]string{
 				sdnv1alpha1.LabelPodNamespace: podNS,
 				sdnv1alpha1.LabelPodName:      podName,
@@ -850,6 +872,51 @@ func rebindPodIdentity(ctx context.Context, client sdnclientset.Interface, p *sd
 	return nil
 }
 
+func bindPersistentPort(ctx context.Context, client sdnclientset.Interface, p *sdnv1alpha1.Port, r resolvedAttachment, state *datapath.AgentState, podNS, podName, podUID, vmName, podLabels string) (net.IP, net.HardwareAddr, *sdnv1alpha1.Port, bool, error) {
+	vpc, vpcNS, ipnet := r.vpc, r.VPCNamespace, r.cidr
+	vmUID := vmidentity.SnapshotUID(podLabels)
+	if p.Labels[labelVMName] != vmName || p.Labels[labelVMNIC] != r.NICID() {
+		return nil, nil, nil, false, fmt.Errorf("persistent Port does not identify this VM NIC")
+	}
+	ownerUID := p.Labels[vmidentity.InstanceUIDLabel]
+	if ownerUID == "" {
+		ownerUID = string(vmidentity.SnapshotUID(p.Annotations[sdnv1alpha1.AnnotationPodLabels]))
+	}
+	if ownerUID != string(vmUID) {
+		return nil, nil, nil, false, fmt.Errorf("persistent port %s belongs to a different VMI UID", p.Name)
+	}
+	if p.Spec.PodNamespace != podNS || p.Spec.VPCRef.Namespace != vpcNS || p.Spec.VPCRef.Name != vpc.Name || p.DeletionTimestamp != nil {
+		return nil, nil, nil, false, fmt.Errorf("persistent port %s does not belong to this live attachment", p.Name)
+	}
+	ip := net.ParseIP(p.Spec.IP)
+	if ip == nil || ipam.IsPoolReserved(ipnet, ip) || !ipnet.Contains(ip) || p.Name != portName(vpc.Status.VNI, ip.String()) {
+		return nil, nil, nil, false, fmt.Errorf("persistent port %s has invalid IP %q", p.Name, p.Spec.IP)
+	}
+	mac, err := net.ParseMAC(p.Spec.MAC)
+	if err != nil || len(mac) != 6 || mac[0]&1 != 0 {
+		return nil, nil, nil, false, fmt.Errorf("persistent port %s has invalid pinned MAC", p.Name)
+	}
+	// A pinned VM address that disagrees with the requested one is a
+	// contradiction, not a preference: the persistent Port is the VM's
+	// identity and cannot be re-pointed without breaking migration.
+	if r.IP != nil && !r.IP.Equal(ip) {
+		return nil, nil, nil, false, fmt.Errorf(
+			"attachment %d requests ip %s but VM %q already holds pinned address %s on this interface",
+			r.Index, r.IP, vmName, p.Spec.IP)
+	}
+	// Re-point the Port's pod identity at the pod binding it NOW. The
+	// {IP, MAC} stay pinned — that is the whole point of a persistent
+	// Port — but membership must follow the live launcher, or a migrated
+	// VM's SecurityGroup membership would freeze at its original labels
+	// (docs/security-groups.md § Membership).
+	if p.Spec.Node == "" || p.Spec.Node == state.NodeName {
+		if err := rebindPodIdentity(ctx, client, p, podNS, podName, podUID, podLabels); err != nil {
+			return nil, nil, nil, false, fmt.Errorf("rebind pod identity on %s: %w", p.Name, err)
+		}
+	}
+	return ip, mac, p, true, nil
+}
+
 // attachPort obtains the Port realizing one attachment and returns its VPC IP,
 // the pinned MAC (nil when the veth keeps its random one), the Port, and whether
 // the Port pre-existed (bound => never ours to delete).
@@ -869,51 +936,47 @@ func rebindPodIdentity(ctx context.Context, client sdnclientset.Interface, p *sd
 //     atomically by Port name.
 func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAttachment,
 	state *datapath.AgentState, podNS, podName, podUID, vmName, podLabels string) (net.IP, net.HardwareAddr, *sdnv1alpha1.Port, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, false, err
+	}
 	vpc, vpcNS := r.vpc, r.VPCNamespace
+	if err := validateAttachmentVPC(vpc); err != nil {
+		return nil, nil, nil, false, err
+	}
 	ipnet := r.cidr
+	if r.IP != nil && ipam.IsPoolReserved(ipnet, r.IP) {
+		return nil, nil, nil, false, fmt.Errorf("requested IP %s is reserved for the platform or VPC pool", r.IP)
+	}
+	if r.containerID != "" && vmName == "" {
+		p, err := findUniquePort(ctx, client, labelPodUID+"="+podUID, func(p *sdnv1alpha1.Port) bool {
+			return portOwnedBySandbox(p, r.containerID, r.cniIfName) && p.Labels[labelIfName] == r.IfName
+		})
+		if err != nil {
+			return nil, nil, nil, false, err
+		}
+		if p != nil {
+			address, mac, err := sandboxPortAddress(p, r, state, podNS, podName, podUID)
+			if err != nil {
+				return nil, nil, nil, false, err
+			}
+			// Reused ordinary Ports, like persistent Ports, survive retry rollback.
+			return address, mac, p, true, nil
+		}
+	}
 
 	if vmName != "" {
-		sel := fmt.Sprintf("%s=%s,%s=%s,%s=%s,%s=%s", labelVPCNamespace, vpcNS, labelVPC, vpc.Name,
-			labelVMName, vmName, labelVMNIC, r.NICID())
-		existing, err := client.SdnV1alpha1().Ports().List(ctx, metav1.ListOptions{LabelSelector: sel})
+		vmUID := vmidentity.SnapshotUID(podLabels)
+		if vmUID == "" {
+			return nil, nil, nil, false, fmt.Errorf("persistent attachment requires a verified VMI UID")
+		}
+		sel := fmt.Sprintf("%s=%s,%s=%s,%s=%s,%s=%s,%s=%s", labelVPCNamespace, vpcNS, labelVPC, vpc.Name,
+			labelVMName, vmName, labelVMNIC, r.NICID(), labelPodNS, podNS)
+		p, err := findUniquePort(ctx, client, sel, nil)
 		if err != nil {
 			return nil, nil, nil, false, fmt.Errorf("list persistent ports for vm %q: %w", vmName, err)
 		}
-		if len(existing.Items) > 0 {
-			p := &existing.Items[0]
-			ip := net.ParseIP(p.Spec.IP)
-			if ip == nil {
-				return nil, nil, nil, false, fmt.Errorf("persistent port %s has invalid IP %q", p.Name, p.Spec.IP)
-			}
-			mac, err := net.ParseMAC(p.Spec.MAC)
-			if err != nil {
-				return nil, nil, nil, false, fmt.Errorf("persistent port %s has invalid MAC %q: %w", p.Name, p.Spec.MAC, err)
-			}
-			// A pinned VM address that disagrees with the requested one is a
-			// contradiction, not a preference: the persistent Port is the VM's
-			// identity and cannot be re-pointed without breaking migration.
-			if r.IP != nil && !r.IP.Equal(ip) {
-				return nil, nil, nil, false, fmt.Errorf(
-					"attachment %d requests ip %s but VM %q already holds pinned address %s on this interface",
-					r.Index, r.IP, vmName, p.Spec.IP)
-			}
-			if p.Spec.Primary != r.Primary() {
-				raw, _ := json.Marshal(map[string]any{"spec": map[string]any{"primary": r.Primary()}})
-				updated, err := client.SdnV1alpha1().Ports().Patch(ctx, p.Name, k8stypes.MergePatchType, raw, metav1.PatchOptions{})
-				if err != nil {
-					return nil, nil, nil, false, fmt.Errorf("persist primary attachment: %w", err)
-				}
-				p = updated
-			}
-			// Re-point the Port's pod identity at the pod binding it NOW. The
-			// {IP, MAC} stay pinned — that is the whole point of a persistent
-			// Port — but membership must follow the live launcher, or a migrated
-			// VM's SecurityGroup membership would freeze at its original labels
-			// (docs/security-groups.md § Membership). Best-effort.
-			if err := rebindPodIdentity(ctx, client, p, podNS, podName, podUID, podLabels); err != nil {
-				fmt.Fprintf(os.Stderr, "cozyplane: rebind pod identity on %s: %v\n", p.Name, err)
-			}
-			return ip, mac, p, true, nil
+		if p != nil {
+			return bindPersistentPort(ctx, client, p, r, state, podNS, podName, podUID, vmName, podLabels)
 		}
 	}
 
@@ -931,6 +994,7 @@ func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAt
 			labelPodNS:        podNS,
 			labelPodName:      podName,
 			labelPodUID:       podUID,
+			labelIfName:       r.IfName,
 		}
 		spec := sdnv1alpha1.PortSpec{
 			VPCRef: sdnv1alpha1.VPCRef{Namespace: vpcNS, Name: vpc.Name},
@@ -952,6 +1016,7 @@ func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAt
 		if vmName != "" {
 			labels[labelVMName] = vmName
 			labels[labelVMNIC] = r.NICID()
+			labels[vmidentity.InstanceUIDLabel] = string(vmidentity.SnapshotUID(podLabels))
 		}
 		// Only delegated Ports carry it, and only they need it: the annotation
 		// path's DEL releases every Port of the pod at once, while a delegated DEL
@@ -959,9 +1024,9 @@ func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAt
 		if r.Delegated {
 			labels[labelIfName] = r.IfName
 		}
-		var annotations map[string]string
+		annotations := map[string]string{sdnv1alpha1.AnnotationContainerID: r.containerID, sdnv1alpha1.AnnotationCNIIfName: r.cniIfName, sdnv1alpha1.AnnotationCNIPrimary: strconv.FormatBool(r.Primary())}
 		if podLabels != "" {
-			annotations = map[string]string{sdnv1alpha1.AnnotationPodLabels: podLabels}
+			annotations[sdnv1alpha1.AnnotationPodLabels] = podLabels
 		}
 		return &sdnv1alpha1.Port{
 			ObjectMeta: metav1.ObjectMeta{
@@ -983,6 +1048,19 @@ func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAt
 				r.IP, vpc.Name, vpc.Spec.CIDRs[0])
 		}
 		created, err := client.SdnV1alpha1().Ports().Create(ctx, newPort(r.IP.String()), metav1.CreateOptions{})
+		if apierrors.IsAlreadyExists(err) && (r.containerID != "" || vmName != "") {
+			held, getErr := client.SdnV1alpha1().Ports().Get(ctx, holdingPortName(err, newPort(r.IP.String()).Name), metav1.GetOptions{})
+			if getErr == nil && vmName != "" && held.Labels[labelVMName] == vmName && held.Labels[labelVMNIC] == r.NICID() && held.Spec.PodNamespace == podNS && held.Spec.VPCRef.Namespace == vpcNS && held.Spec.VPCRef.Name == vpc.Name {
+				return bindPersistentPort(ctx, client, held, r, state, podNS, podName, podUID, vmName, podLabels)
+			}
+			if getErr == nil && vmName == "" && portOwnedBySandbox(held, r.containerID, r.cniIfName) && held.Labels[labelIfName] == r.IfName {
+				address, mac, reuseErr := sandboxPortAddress(held, r, state, podNS, podName, podUID)
+				return address, mac, held, true, reuseErr
+			}
+			if getErr != nil && !apierrors.IsNotFound(getErr) {
+				return nil, nil, nil, false, getErr
+			}
+		}
 		// AlreadyExists: another Port holds the name. Conflict (409): the
 		// registry's cross-kind check — a ServiceVIP holds the same address.
 		if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
@@ -994,38 +1072,70 @@ func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAt
 		return r.IP, mac, created, false, nil
 	}
 
-	list, err := client.SdnV1alpha1().Ports().List(ctx, metav1.ListOptions{
-		LabelSelector: labelVPCNamespace + "=" + vpcNS + "," + labelVPC + "=" + vpc.Name,
+	used := map[string]bool{}
+	selector := labelVPCNamespace + "=" + vpcNS + "," + labelVPC + "=" + vpc.Name
+	err := ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.Port, string, error) {
+		list, err := client.SdnV1alpha1().Ports().List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: limit, Continue: token})
+		if err != nil {
+			return nil, "", err
+		}
+		return list.Items, list.Continue, nil
+	}, func(p *sdnv1alpha1.Port) {
+		if p.Name == portName(vpc.Status.VNI, p.Spec.IP) {
+			used[p.Spec.IP] = true
+		}
 	})
 	if err != nil {
 		return nil, nil, nil, false, fmt.Errorf("list ports: %w", err)
 	}
-	used := map[string]bool{}
-	for i := range list.Items {
-		used[list.Items[i].Spec.IP] = true
-	}
 	// ServiceVIPs draw from the same per-VPC keyspace (they walk from the TOP
 	// of the CIDR down; Ports walk up) — both allocators check the live union
 	// of both kinds, so neither can hand out the other's address.
-	vips, err := client.SdnV1alpha1().ServiceVIPs().List(ctx, metav1.ListOptions{
-		LabelSelector: labelVPCNamespace + "=" + vpcNS + "," + labelVPC + "=" + vpc.Name,
+	err = ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.ServiceVIP, string, error) {
+		list, err := client.SdnV1alpha1().ServiceVIPs().List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: limit, Continue: token})
+		if err != nil {
+			return nil, "", err
+		}
+		return list.Items, list.Continue, nil
+	}, func(vip *sdnv1alpha1.ServiceVIP) {
+		if vip.Name == sdn.ServiceVIPName(vpc.Status.VNI, vip.Spec.IP) {
+			used[vip.Spec.IP] = true
+		}
 	})
 	if err != nil {
 		return nil, nil, nil, false, fmt.Errorf("list servicevips: %w", err)
 	}
-	for i := range vips.Items {
-		used[vips.Items[i].Spec.IP] = true
-	}
 
 	// Start at network+2 (reserve .0 network and .1 for a future gateway).
 	candidate := nextIP(nextIP(cloneIP(ipnet.IP)))
-	for ipnet.Contains(candidate) {
+	attempts := 0
+	for walked := 0; walked < ipam.MaxCandidateWalk && ipnet.Contains(candidate); walked++ {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, false, err
+		}
 		ipStr := candidate.String()
-		if used[ipStr] {
+		if used[ipStr] || ipam.IsPoolReserved(ipnet, candidate) {
 			candidate = nextIP(candidate)
 			continue
 		}
+		if attempts >= ipam.MaxClaimAttempts {
+			return nil, nil, nil, false, fmt.Errorf("Port allocation exceeded %d concurrent claim attempts", ipam.MaxClaimAttempts)
+		}
+		attempts++
 		created, err := client.SdnV1alpha1().Ports().Create(ctx, newPort(ipStr), metav1.CreateOptions{})
+		if apierrors.IsAlreadyExists(err) && (r.containerID != "" || vmName != "") {
+			held, getErr := client.SdnV1alpha1().Ports().Get(ctx, holdingPortName(err, newPort(ipStr).Name), metav1.GetOptions{})
+			if getErr == nil && vmName != "" && held.Labels[labelVMName] == vmName && held.Labels[labelVMNIC] == r.NICID() && held.Spec.PodNamespace == podNS && held.Spec.VPCRef.Namespace == vpcNS && held.Spec.VPCRef.Name == vpc.Name {
+				return bindPersistentPort(ctx, client, held, r, state, podNS, podName, podUID, vmName, podLabels)
+			}
+			if getErr == nil && vmName == "" && portOwnedBySandbox(held, r.containerID, r.cniIfName) && held.Labels[labelIfName] == r.IfName {
+				address, mac, reuseErr := sandboxPortAddress(held, r, state, podNS, podName, podUID)
+				return address, mac, held, true, reuseErr
+			}
+			if getErr != nil && !apierrors.IsNotFound(getErr) {
+				return nil, nil, nil, false, getErr
+			}
+		}
 		// Either error means the address is taken; walk on.
 		if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
 			used[ipStr] = true
@@ -1037,7 +1147,17 @@ func attachPort(ctx context.Context, client sdnclientset.Interface, r resolvedAt
 		}
 		return candidate, mac, created, false, nil
 	}
-	return nil, nil, nil, false, fmt.Errorf("no free address in VPC %q (%s)", vpc.Name, vpc.Spec.CIDRs[0])
+	return nil, nil, nil, false, fmt.Errorf("no free address within %d candidates in VPC %q (%s)", ipam.MaxCandidateWalk, vpc.Name, vpc.Spec.CIDRs[0])
+}
+
+func holdingPortName(err error, candidate string) string {
+	if status, ok := err.(apierrors.APIStatus); ok {
+		d := status.Status().Details
+		if d != nil && d.Group == sdnv1alpha1.GroupName && d.Kind == "ports" && d.Name != "" {
+			return d.Name
+		}
+	}
+	return candidate
 }
 
 // genMAC returns a random locally-administered unicast MAC (02:…). The Port pins
@@ -1071,11 +1191,11 @@ func setupVeth(args *skel.CmdArgs, cniVersion string, podIPs []net.IP, pinnedMAC
 	var hostVethName string
 	var podMAC net.HardwareAddr
 	if err := ns.WithNetNSPath(args.Netns, func(ns.NetNS) error {
-		hostVeth, _, e := ip.SetupVethWithName(contVethName, hostVethNameFor(args.ContainerID), mtu, "", hostNS)
+		e := setupSandboxVeth(args.ContainerID, args.IfName, contVethName, hostVethNameFor(args.ContainerID), mtu, hostNS)
 		if e != nil {
 			return e
 		}
-		hostVethName = hostVeth.Name
+		hostVethName = hostVethNameFor(args.ContainerID)
 		mac, e := configurePodIface(podIPs, pinnedMAC)
 		podMAC = mac
 		return e
@@ -1083,7 +1203,7 @@ func setupVeth(args *skel.CmdArgs, cniVersion string, podIPs []net.IP, pinnedMAC
 		return nil, nil, err
 	}
 
-	if err := configureHostVeth(hostVethName, podIPs, netID, podMAC, nil); err != nil {
+	if err := configureHostVeth(hostVethName, podIPs, netID, podMAC, nil, args.ContainerID, args.IfName); err != nil {
 		return nil, nil, err
 	}
 
@@ -1185,7 +1305,7 @@ func addPodAddrRoute(link netlink.Link, podIP net.IP, primary bool, vpcCIDR *net
 // forwarding, installs the /32 route (host->local-pod), attaches both classifier
 // hooks (from_pod ingress, to_pod egress), and records the pod's network id and
 // local endpoint.
-func configureHostVeth(name string, podIPs []net.IP, netID uint32, podMAC net.HardwareAddr, fwdCIDRs []string) error {
+func configureHostVeth(name string, podIPs []net.IP, netID uint32, podMAC net.HardwareAddr, fwdCIDRs []string, containerID, ifName string, identities ...datapath.PortVethIdentity) error {
 	hv, err := netlink.LinkByName(name)
 	if err != nil {
 		return err
@@ -1232,8 +1352,16 @@ func configureHostVeth(name string, podIPs []net.IP, netID uint32, podMAC net.Ha
 	}
 
 	idx := hv.Attrs().Index
-	index, err := datapath.Ifindex(idx)
-	if err != nil {
+	if _, err := datapath.Ifindex(idx); err != nil {
+		return err
+	}
+	identity := datapath.PortVethIdentity{}
+	if len(identities) > 0 {
+		identity = identities[0]
+	}
+	// Never attach a new program to an ifindex carrying a previous endpoint's
+	// identity. Successful configuration replaces this temporary map quarantine.
+	if err := datapath.PrepareEndpointHooks(hv, containerID, ifName, identity); err != nil {
 		return err
 	}
 
@@ -1244,11 +1372,7 @@ func configureHostVeth(name string, podIPs []net.IP, netID uint32, podMAC net.Ha
 	// collide under overlapping CIDRs. So install the route only for net 0.
 	if netID == 0 {
 		for _, podIP := range podIPs {
-			if err := netlink.RouteAdd(&netlink.Route{
-				LinkIndex: idx,
-				Scope:     netlink.SCOPE_LINK,
-				Dst:       &net.IPNet{IP: podIP, Mask: hostMask(podIP)},
-			}); err != nil && !isExist(err) {
+			if err := datapath.EnsureFabricHostRoute(idx, podIP); err != nil {
 				return fmt.Errorf("add pod host route: %w", err)
 			}
 		}
@@ -1277,45 +1401,19 @@ func configureHostVeth(name string, podIPs []net.IP, netID uint32, podMAC net.Ha
 	// recreate, and the witness that keeps the entries below from being pruned
 	// as stale (see datapath/rebuild.go). Written BEFORE the map entries so no
 	// entry ever exists without its alias.
-	if err := datapath.SetVethAlias(hv, netID, podIPs, podMAC); err != nil {
-		return err
-	}
-	if err := datapath.SetPortNet(idx, netID); err != nil {
-		return err
-	}
-	// A scoped forwarding leg (issue #6): program its foreign-source allowlist
-	// keyed by this veth's ifindex. Clear first — an ifindex can be reused by a
-	// later pod, and a stale entry would widen the new leg's grant. Only when
-	// PORT_F_FWD_SCOPED is set; an unscoped/non-forwarding port consults nothing.
-	if netID&datapath.PortForwardScopedFlag != 0 {
-		if err := datapath.ClearFwdCidrs(index); err != nil {
-			return err
-		}
-		for _, cidr := range fwdCIDRs {
-			if err := datapath.SetFwdCidr(index, cidr); err != nil {
-				return fmt.Errorf("program forwarding CIDR %q: %w", cidr, err)
-			}
-		}
-	} else {
-		// Not (or no longer) scoped: clear any leftover from a reused ifindex.
-		if err := datapath.ClearFwdCidrs(index); err != nil {
-			return err
-		}
-	}
-	// Record a local endpoint per address (keyed by network id, so overlapping
-	// VPCs stay distinct) for eBPF-redirect delivery through to_pod.
-	for _, podIP := range podIPs {
-		if err := datapath.SetLocal(datapath.PortNet(netID), podIP, idx, podMAC); err != nil {
-			return err
-		}
-	}
-	return nil
+	return datapath.ConfigureEndpoint(hv, netID, podIPs, podMAC, containerID, ifName, identity, fwdCIDRs)
 }
 
 func cmdDel(args *skel.CmdArgs) error {
 	ctx, cancel := operationContext()
 	defer cancel()
+	if args.ContainerID == "" || args.IfName == "" {
+		return nil
+	}
+	return withSandboxLock(ctx, sandboxLockDir, args.ContainerID, args.IfName, func() error { return delSandbox(ctx, args) })
+}
 
+func delSandbox(ctx context.Context, args *skel.CmdArgs) error {
 	conf, err := loadConf(args.StdinData)
 	if err != nil {
 		return err
@@ -1338,6 +1436,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	// enumerating the index range finds them all without a link scan; absent
 	// ones simply miss.
 	vpcNet, haveVPCNet := uint32(0), false
+	ownIfindices := map[int]bool{}
 	names := make([]string, 0, maxAttachments+1)
 	for i := range maxAttachments {
 		names = append(names, hostVethNameForIndex(args.ContainerID, i))
@@ -1345,6 +1444,11 @@ func cmdDel(args *skel.CmdArgs) error {
 	names = append(names, gwHostVethNameFor(args.ContainerID))
 	for _, name := range names {
 		if hv, e := netlink.LinkByName(name); e == nil {
+			containerID, ifName := datapath.VethSandbox(hv.Attrs().Alias)
+			if containerID != "" && (containerID != args.ContainerID || ifName != args.IfName) {
+				continue
+			}
+			ownIfindices[hv.Attrs().Index] = true
 			if name == hostVethNameFor(args.ContainerID) {
 				if n, ok, e := datapath.GetPortNet(hv.Attrs().Index); e == nil && ok {
 					vpcNet, haveVPCNet = n, true
@@ -1364,71 +1468,44 @@ func cmdDel(args *skel.CmdArgs) error {
 		selector = labelPodUID + "=" + podUID
 	}
 	if client, e := sdnClient(); e == nil && (podUID != "" || (podNS != "" && podName != "")) {
-		if list, e := client.SdnV1alpha1().Ports().List(ctx, metav1.ListOptions{
-			LabelSelector: selector,
-		}); e == nil {
-			for i := range list.Items {
-				p := &list.Items[i]
-				// The VPC/gateway-leg local entry is keyed by (net id, VPC IP);
-				// net id is the VNI encoded in the Port name.
-				if net_, ok := netFromPortName(p.Name); ok {
-					_ = datapath.DelLocal(net_, net.ParseIP(p.Spec.IP))
-				}
-				// A persistent (VM NIC) Port outlives its pod so the VPC IP + MAC
-				// survive pod churn / live migration: never delete it here — the
-				// persistent-Port controller GCs it when the VM is gone.
-				if p.Labels[labelVMName] != "" {
-					continue
-				}
-				_ = client.SdnV1alpha1().Ports().Delete(ctx, p.Name, metav1.DeleteOptions{})
+		if err := releaseSandboxPorts(ctx, client, selector, args.ContainerID, args.IfName, func(p *sdnv1alpha1.Port) {
+			if netID, ok := netFromPortName(p.Name); ok {
+				delSandboxLocal(netID, net.ParseIP(p.Spec.IP), ownIfindices)
 			}
+		}); err != nil {
+			return err
 		}
 	}
 
-	// The bridge is keyed by the pod's underlay address, which lives in its
-	// FabricIP claim(s) — read them BEFORE releasing, since releasing is what
-	// destroys them.
-	if podUID != "" {
-		if lc, e := localClient(); e == nil {
-			if list, e2 := lc.LocalV1alpha1().FabricIPs().List(ctx, metav1.ListOptions{
-				LabelSelector: labelFabricPodUID + "=" + podUID,
-			}); e2 == nil {
-				for i := range list.Items {
-					_ = datapath.DelBridge(list.Items[i].Spec.Address, hostVethNameFor(args.ContainerID))
-				}
-			}
-		}
-	}
-
-	// Release the underlay claim(s). Best-effort by design: if this DEL never
-	// runs (the node died, kubelet was down when the pod went away), the
-	// controller's GC reaps the FabricIP once the pod is gone. That is the whole
-	// reason the address is an object and not a line in host-local's file store,
-	// where a missed DEL leaked the address permanently (docs/api-groups.md).
-	// Keyed on pod UID, so a reused pod name cannot reap the new pod's address.
-	if podUID != "" {
-		if lc, e := localClient(); e == nil {
-			_ = releaseFabricIPs(ctx, lc, podUID)
+	// The sandbox, not the Pod UID, owns these addresses and bridge entries.
+	// Legacy claims with no sandbox identity are left to controller GC.
+	if lc, e := localClient(); e == nil {
+		if e := releaseFabricIPs(ctx, lc, podUID, args.ContainerID, args.IfName, func(address string) error {
+			return datapath.DelSandboxBridge(address, hostVethNameFor(args.ContainerID), args.ContainerID, args.IfName)
+		}); e != nil {
+			return e
 		}
 	}
 
 	if args.Netns == "" {
 		return nil
 	}
-	return ns.WithNetNSPath(args.Netns, func(ns.NetNS) error {
+	return ns.WithNetNSPath(args.Netns, func(hostNS ns.NetNS) error {
+		podNS, err := ns.GetCurrentNS()
+		if err != nil {
+			return err
+		}
+		defer podNS.Close()
 		// The gateway leg's VPC-IP local entry was cleared above via its Port.
-		_, _ = ip.DelLinkByNameAddr(gwVethName)
+		_, _ = deleteSandboxPodVeth(args.ContainerID, args.IfName, gwVethName, hostNS, podNS)
 		// Secondary attachments, by their default names. A custom `name` is not
 		// reconstructible here and is skipped: the netns is being torn down by
 		// the runtime anyway, and every attachment's locals entry was already
 		// released above through its Port (listed by pod UID, so all of them).
 		for i := 1; i < maxAttachments; i++ {
-			_, _ = ip.DelLinkByNameAddr(defaultIfName(i))
+			_, _ = deleteSandboxPodVeth(args.ContainerID, args.IfName, defaultIfName(i), hostNS, podNS)
 		}
-		addrs, e := ip.DelLinkByNameAddr(contVethName)
-		if e == ip.ErrLinkNotFound {
-			return nil
-		}
+		addrs, e := deleteSandboxPodVeth(args.ContainerID, args.IfName, contVethName, hostNS, podNS)
 		// Release the default-network local entry (net 0), and — for a VPC pod —
 		// the VPC-net entry too, keyed by (captured net, VPC IP from the veth).
 		// Doing it from the veth address makes cleanup independent of the Port,
@@ -1436,9 +1513,9 @@ func cmdDel(args *skel.CmdArgs) error {
 		// its persistent Port now points at the target pod.
 		for _, a := range addrs {
 			if a.IP != nil {
-				_ = datapath.DelLocal(0, a.IP)
+				delSandboxLocal(0, a.IP, ownIfindices)
 				if haveVPCNet && vpcNet != 0 {
-					_ = datapath.DelLocal(vpcNet, a.IP)
+					delSandboxLocal(vpcNet, a.IP, ownIfindices)
 				}
 			}
 		}

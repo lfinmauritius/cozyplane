@@ -28,7 +28,7 @@ func TestStatusGroupsCannotBecomeWorld(t *testing.T) {
 	for _, tc := range []struct {
 		groups []int32
 		valid  bool
-	}{{nil, true}, {[]int32{0}, true}, {[]int32{1, 62}, true}, {[]int32{0, 1}, false}, {[]int32{-1}, false}, {[]int32{63}, false}, {[]int32{64}, false}, {[]int32{65537}, false}} {
+	}{{nil, true}, {[]int32{0}, true}, {[]int32{1, 62}, true}, {[]int32{0, 1}, true}, {[]int32{-1}, false}, {[]int32{63}, false}, {[]int32{64}, false}, {[]int32{65537}, false}} {
 		port := &sdn.Port{Status: sdn.PortStatus{Groups: tc.groups}}
 		if errs := s.ValidateUpdate(context.Background(), port, port.DeepCopy()); (len(errs) == 0) != tc.valid {
 			t.Errorf("groups %v errors %v valid %v", tc.groups, errs, tc.valid)

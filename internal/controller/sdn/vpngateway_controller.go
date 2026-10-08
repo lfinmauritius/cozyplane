@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"k8s.io/utils/ptr"
+	"math"
 	"net"
 	"net/http"
 	"slices"
@@ -45,6 +46,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -53,6 +55,8 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
+	"github.com/lllamnyp/cozyplane/internal/vpnidentity"
+	"github.com/lllamnyp/cozyplane/internal/vpnlimits"
 	"github.com/lllamnyp/cozyplane/internal/vpnstatus"
 )
 
@@ -226,6 +230,7 @@ func haMode(gw *sdnv1alpha1.VPNGateway) sdnv1alpha1.VPNGatewayHAMode {
 }
 
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpngateways,verbs=get;list;watch
+// +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpcs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpngateways/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpnconnections,verbs=get;list;watch
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpnconnections/status,verbs=get;update;patch
@@ -249,6 +254,12 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	if r.Config.Image == "" {
 		return ctrl.Result{}, nil
+	}
+	if !gw.DeletionTimestamp.IsZero() {
+		return r.reportUnready(ctx, gw, "GatewayTerminating", "VPNGateway is being deleted")
+	}
+	if problem := vpnGatewayInputProblem(gw); problem != "" {
+		return r.reportUnready(ctx, gw, "InputLimitExceeded", problem)
 	}
 
 	// The served VPCs: the primary (spec.vpcRef) first, then the hub's additional
@@ -276,16 +287,6 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	backend := backendOf(gw)
-	if err := applyIPsecAddressPools(gw, conns); err != nil {
-		return r.reportUnready(ctx, gw, "AddressPoolInvalid", err.Error())
-	}
-	// Route-CIDR deny-set: strip cluster-internal / reserved remote CIDRs before
-	// anything consumes them, so a tenant cannot redirect the VPC's own internal
-	// traffic into a tunnel. The rejected prefixes surface in a condition.
-	rejectedCIDRs := r.filterForbiddenCIDRs(conns, servedCIDRs)
-	fwdCIDRs := unionRemoteCIDRs(conns)
-
 	// Per-tenant quota (increment 6): reject a gateway beyond the namespace cap or
 	// a gateway with too many peers, before materializing anything — a tenant must
 	// not be able to stand up unbounded crypto workloads. Under-quota gateways are
@@ -297,10 +298,34 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// on the informer cache let a concurrent reconcile create, so the
 		// forwarding grant, tunnel and public IP are actually revoked rather than
 		// left running behind a cosmetic Pending status.
-		if err := r.teardownOwned(ctx, gw); err != nil {
-			return ctrl.Result{}, err
-		}
 		return r.reportUnready(ctx, gw, "QuotaExceeded", reason)
+	}
+	if problem := vpnRouteInputProblem(conns); problem != "" {
+		return r.reportUnready(ctx, gw, "InputLimitExceeded", problem)
+	}
+	for i := range conns {
+		if problem := vpnConnectionReferenceProblem(&conns[i]); problem != "" {
+			return r.reportUnready(ctx, gw, "InputLimitExceeded", problem)
+		}
+	}
+	backend := backendOf(gw)
+	if err := applyIPsecAddressPools(gw, conns); err != nil {
+		return r.reportUnready(ctx, gw, "AddressPoolInvalid", err.Error())
+	}
+	if problem := vpnRouteInputProblem(conns); problem != "" {
+		return r.reportUnready(ctx, gw, "InputLimitExceeded", problem)
+	}
+	// Strip forbidden prefixes before grants, routes or peer configuration consume them.
+	rejectedCIDRs := r.filterForbiddenCIDRs(conns, servedCIDRs)
+	fwdCIDRs := unionRemoteCIDRs(conns)
+	if len(fwdCIDRs) > vpnlimits.RoutePrefixes/len(servedVPCs) {
+		return r.reportUnready(ctx, gw, "InputLimitExceeded", "hub route prefixes exceed the combined VPC budget")
+	}
+	// Protect newly accepted intent before a credential/configuration failure
+	// can leave it indistinguishable from an ordinary NAT route miss. An
+	// unchanged prefix set performs no write and retains its active next hops.
+	if err := r.protectRouteIntent(ctx, gw, conns); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// The gateway's WireGuard identity: generated once, kept in a Secret; only the
@@ -314,7 +339,7 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		privateKeys, publicKeys, err = r.ensureKeypairs(ctx, gw, keyCount)
 		if err != nil {
-			return ctrl.Result{}, err
+			return r.configurationFailure(ctx, gw, err)
 		}
 	}
 
@@ -322,11 +347,12 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// so it is a Secret; its checksum rolls the appliance when peers change.
 	cfgJSON, err := r.buildConfig(ctx, gw, servedVPCs, backend, privateKeys, conns)
 	if err != nil {
-		return ctrl.Result{}, err
+		// Invalid or removed credentials must not leave an old peer set active.
+		return r.configurationFailure(ctx, gw, err)
 	}
 	checksum, err := r.ensureConfigSecret(ctx, gw, cfgJSON)
 	if err != nil {
-		return ctrl.Result{}, err
+		return r.configurationFailure(ctx, gw, err)
 	}
 
 	// The scoped forwarding grant (increment 2): the appliance may source the
@@ -334,13 +360,13 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// — the bindings still exist (attach authorization) but grant no forwarding.
 	// One binding per served VPC (docs/vpn.md §3.3).
 	if err := r.ensureBindings(ctx, gw, servedVPCs, fwdCIDRs); err != nil {
-		return ctrl.Result{}, err
+		return r.configurationFailure(ctx, gw, err)
 	}
 
 	// The appliance itself: a pod for ordinary/crash HA, or a KubeVirt VM whose
 	// guest kernel carries the crypto state through planned live migration.
 	if err := r.ensureApplianceWorkload(ctx, gw, backend, checksum); err != nil {
-		return ctrl.Result{}, err
+		return r.configurationFailure(ctx, gw, err)
 	}
 
 	// Resolve one selected leg for ordinary/warm-standby gateways and two for
@@ -386,22 +412,25 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// The routes the agent programs into vpc_routes: each connection's remote
-	// CIDRs toward the appliance's leg in each served VPC (docs/vpn.md §3.3).
-	// The agent scopes a route by the VNI of its next-hop Port, so one entry per
-	// (connection × VPC) — never a mix of legs from two VPCs in one entry. Every
-	// VPC's routes point at the leg(s) of the SAME appliance(s) selected in the
-	// primary VPC: that is where the tunnel lives. Empty until the Ports resolve.
+	// CIDRs toward the appliance Port. Keep unresolved accepted prefixes as
+	// blackholes: removing them would permit ordinary cleartext NAT egress.
 	var routes []sdnv1alpha1.VPCGatewayRouteStatus
-	if len(appliancePorts) == wantAppliances {
-		for vi, served := range servedVPCs {
-			vpcPorts := appliancePorts
-			if vi > 0 {
-				vpcPorts = r.resolveVPCLegPorts(ctx, gw, served, appliances)
-				if len(vpcPorts) != wantAppliances {
-					continue // leg(s) not minted yet; the Port watch re-enqueues
-				}
+	allLegsReady := true
+	for i, served := range servedVPCs {
+		legPorts := appliancePorts
+		if i > 0 {
+			legPorts = nil
+			for _, leg := range r.resolveAppliancePorts(ctx, gw, served, wantAppliances) {
+				legPorts = append(legPorts, leg.Port)
 			}
-			routes = append(routes, connectionRoutes(conns, vpcPorts)...)
+		}
+		if len(legPorts) != wantAppliances {
+			allLegsReady = false
+			legPorts = nil
+		}
+		for _, route := range connectionRoutes(conns, legPorts) {
+			route.VPCRef.Name = served.Name
+			routes = append(routes, route)
 		}
 	}
 
@@ -421,7 +450,7 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		"ApplianceReady", applianceReadyMessage(appliancePort))
 	setVPNGWCondition(&status, sdnv1alpha1.VPNGatewayConditionAddressAssigned, address != "",
 		"AddressAssigned", addressMessage(address))
-	routesReady := len(appliancePorts) == wantAppliances &&
+	routesReady := allLegsReady && len(appliancePorts) == wantAppliances &&
 		len(routes) == len(nonEmptyRouteConns(conns))*len(servedVPCs)
 	setVPNGWCondition(&status, sdnv1alpha1.VPNGatewayConditionRoutesProgrammed, routesReady,
 		"RoutesProgrammed", routesMessage(routesReady, len(routes)))
@@ -467,6 +496,30 @@ func vpnStatusPollInterval(gw *sdnv1alpha1.VPNGateway) time.Duration {
 	return 15 * time.Second
 }
 
+// Names and labels are tenant-controlled; only the current owner's UID can
+// authorize reuse or deletion of an appliance resource.
+func requireVPNOwner(obj client.Object, owner client.Object) error {
+	if owner.GetUID() == "" || obj.GetNamespace() != owner.GetNamespace() || !metav1.IsControlledBy(obj, owner) {
+		return fmt.Errorf("resource %T %s/%s is not controlled by %s", obj, obj.GetNamespace(), obj.GetName(), owner.GetName())
+	}
+	return nil
+}
+
+func (r *VPNGatewayReconciler) deleteVPNOwned(ctx context.Context, owner client.Object, obj client.Object) error {
+	if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			return nil
+		}
+		return err
+	}
+	if requireVPNOwner(obj, owner) != nil {
+		return nil // a name collision never authorizes deleting another object
+	}
+	uid, version := obj.GetUID(), obj.GetResourceVersion()
+	err := r.Delete(ctx, obj, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}})
+	return client.IgnoreNotFound(err)
+}
+
 // teardownOwned deletes the active resources a gateway owns — the tunnel
 // Deployment, the forwarding-grant VPCBinding, and the FloatingIP endpoint — so
 // a rejected gateway grants and serves nothing. The keypair/config Secrets are
@@ -475,6 +528,7 @@ func vpnStatusPollInterval(gw *sdnv1alpha1.VPNGateway) time.Duration {
 func (r *VPNGatewayReconciler) teardownOwned(ctx context.Context, gw *sdnv1alpha1.VPNGateway) error {
 	name := gw.Name + "-vpn"
 	objs := []client.Object{
+		&sdnv1alpha1.VPCBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gw.Namespace}},
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gw.Namespace}},
 		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gw.Namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + "-headless", Namespace: gw.Namespace}},
@@ -484,7 +538,7 @@ func (r *VPNGatewayReconciler) teardownOwned(ctx context.Context, gw *sdnv1alpha
 		&sdnv1alpha1.FloatingIP{ObjectMeta: metav1.ObjectMeta{Name: name + "-1", Namespace: gw.Namespace}},
 	}
 	for _, o := range objs {
-		if err := r.Delete(ctx, o); err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+		if err := r.deleteVPNOwned(ctx, gw, o); err != nil {
 			return fmt.Errorf("teardown %T %q: %w", o, name, err)
 		}
 	}
@@ -494,25 +548,47 @@ func (r *VPNGatewayReconciler) teardownOwned(ctx context.Context, gw *sdnv1alpha
 }
 
 // reportUnready writes a Pending status carrying a single blocking reason when
-// the gateway cannot be realized (no VPC), without touching owned objects.
+// the gateway cannot be realized, after draining its previously active grant.
 func (r *VPNGatewayReconciler) reportUnready(ctx context.Context, gw *sdnv1alpha1.VPNGateway, reason, msg string) (ctrl.Result, error) {
+	if err := r.teardownOwned(ctx, gw); err != nil {
+		return ctrl.Result{}, err
+	}
 	status := sdnv1alpha1.VPNGatewayStatus{Phase: sdnv1alpha1.VPNGatewayPhasePending}
+	if reason != "GatewayTerminating" && (reason != "VPCUnresolved" || len(gw.Spec.AdditionalVPCRefs) > 0) {
+		routes, err := blackholeVPNRoutes(gw.Status.Routes)
+		if err != nil {
+			return ctrl.Result{}, err // never erase an incomplete protected set
+		}
+		status.Routes = routes
+	}
 	setVPNGWCondition(&status, sdnv1alpha1.VPNGatewayConditionApplianceReady, false, reason, msg)
 	setVPNGWCondition(&status, sdnv1alpha1.VPNGatewayConditionAddressAssigned, false, reason, msg)
 	setVPNGWCondition(&status, sdnv1alpha1.VPNGatewayConditionRoutesProgrammed, false, reason, msg)
 	return ctrl.Result{}, r.writeStatus(ctx, gw, status)
 }
 
-// connectionsFor lists the VPNConnections that name this gateway.
+// connectionsFor returns all active peers when within quota, otherwise quota+1
+// peers witnessing overflow. The caller must reject overflow before using them.
 func (r *VPNGatewayReconciler) connectionsFor(ctx context.Context, gw *sdnv1alpha1.VPNGateway) ([]sdnv1alpha1.VPNConnection, error) {
 	var list sdnv1alpha1.VPNConnectionList
-	if err := r.List(ctx, &list, client.InNamespace(gw.Namespace)); err != nil {
+	limit := int64(r.maxConnectionsPerGateway())
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	// The index excludes terminating peers. Limiting a mixed active/deleting
+	// list could silently omit live peers and publish a partial configuration.
+	if err := r.List(ctx, &list, client.InNamespace(gw.Namespace), client.MatchingFields{vpnConnectionGatewayIndex: gw.Name}, client.Limit(limit)); err != nil {
 		return nil, fmt.Errorf("list VPNConnections: %w", err)
 	}
 	var out []sdnv1alpha1.VPNConnection
 	for i := range list.Items {
-		if list.Items[i].Spec.GatewayRef.Name == gw.Name && list.Items[i].DeletionTimestamp.IsZero() {
-			out = append(out, list.Items[i])
+		if list.Items[i].Spec.GatewayRef.Name != gw.Name || !list.Items[i].DeletionTimestamp.IsZero() {
+			return nil, fmt.Errorf("inconsistent active VPNConnection gateway index")
+		}
+		out = append(out, list.Items[i])
+		// Never process an unbounded result if a reader ignores List Limit.
+		if int64(len(out)) >= limit {
+			break
 		}
 	}
 	// Deterministic order so the config checksum and route status are stable.
@@ -527,40 +603,9 @@ func (r *VPNGatewayReconciler) connectionsFor(ctx context.Context, gw *sdnv1alph
 func (r *VPNGatewayReconciler) overQuota(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
 	conns []sdnv1alpha1.VPNConnection) (string, error) {
 	if maxConns := r.maxConnectionsPerGateway(); len(conns) > maxConns {
-		return fmt.Sprintf("gateway has %d connections, over the per-gateway limit of %d", len(conns), maxConns), nil
+		return fmt.Sprintf("gateway has at least %d connections, over the per-gateway limit of %d", len(conns), maxConns), nil
 	}
-	maxGW := r.maxGatewaysPerNamespace()
-	var list sdnv1alpha1.VPNGatewayList
-	if err := r.quotaReader().List(ctx, &list, client.InNamespace(gw.Namespace)); err != nil {
-		return "", fmt.Errorf("list VPNGateways for quota: %w", err)
-	}
-	items := make([]*sdnv1alpha1.VPNGateway, 0, len(list.Items))
-	for i := range list.Items {
-		if list.Items[i].DeletionTimestamp.IsZero() {
-			items = append(items, &list.Items[i])
-		}
-	}
-	if len(items) <= maxGW {
-		return "", nil
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if !items[i].CreationTimestamp.Equal(&items[j].CreationTimestamp) {
-			return items[i].CreationTimestamp.Before(&items[j].CreationTimestamp)
-		}
-		return items[i].Name < items[j].Name
-	})
-	rank := 0
-	for i, g := range items {
-		if g.Name == gw.Name {
-			rank = i
-			break
-		}
-	}
-	if rank >= maxGW {
-		return fmt.Sprintf("namespace has %d VPN gateways, over the limit of %d (this one is #%d oldest)",
-			len(items), maxGW, rank+1), nil
-	}
-	return "", nil
+	return r.gatewayQuota(ctx, gw)
 }
 
 // filterForbiddenCIDRs strips every cluster-internal / reserved remote CIDR from
@@ -571,25 +616,53 @@ func (r *VPNGatewayReconciler) overQuota(ctx context.Context, gw *sdnv1alpha1.VP
 // slice never touches the informer cache.
 func (r *VPNGatewayReconciler) filterForbiddenCIDRs(conns []sdnv1alpha1.VPNConnection, servedCIDRs []*net.IPNet) []string {
 	var rejected []string
+	rejectedCount := 0
 	for i := range conns {
 		allowed := make([]string, 0, len(conns[i].Spec.RemoteCIDRs))
 		for _, c := range conns[i].Spec.RemoteCIDRs {
 			if reason := r.forbiddenRemoteCIDR(c, servedCIDRs); reason != "" {
-				rejected = append(rejected, fmt.Sprintf("%s (%s)", c, reason))
+				rejectedCount++
+				if len(rejected) < 32 {
+					rejected = append(rejected, fmt.Sprintf("%.64s (%s)", c, reason))
+				}
 				continue
 			}
 			allowed = append(allowed, c)
 		}
 		conns[i].Spec.RemoteCIDRs = allowed
 	}
+	if rejectedCount > len(rejected) {
+		rejected = append(rejected, fmt.Sprintf("%d additional rejected CIDRs omitted", rejectedCount-len(rejected)))
+	}
 	return rejected
 }
 
+func vpnRouteInputProblem(conns []sdnv1alpha1.VPNConnection) string {
+	prefixes := 0
+	for i := range conns {
+		if len(conns[i].Spec.RemoteCIDRs) > vpnlimits.RoutePrefixes-prefixes {
+			return "VPN route prefix candidates exceed 4096"
+		}
+		prefixes += len(conns[i].Spec.RemoteCIDRs)
+	}
+	return ""
+}
+
 // forbiddenRemoteCIDR returns why a remote CIDR is refused, or "" when allowed.
-// servedCIDRs are the served VPCs' own prefixes: a remote CIDR overlapping one
-// would let a remote site claim (and the appliance source) a VPC's own
-// addresses — the hub constraint, docs/vpn.md §3.3.
 func (r *VPNGatewayReconciler) forbiddenRemoteCIDR(cidr string, servedCIDRs []*net.IPNet) string {
+	if reason := forbiddenRouteCIDR(cidr, r.Config.InternalCIDRs); reason != "" {
+		return reason
+	}
+	_, prefix, _ := net.ParseCIDR(cidr)
+	for _, served := range servedCIDRs {
+		if cidrsOverlap(prefix, served) {
+			return "served VPC"
+		}
+	}
+	return ""
+}
+
+func forbiddenRouteCIDR(cidr string, internalCIDRs []*net.IPNet) string {
 	_, n, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return "not a CIDR"
@@ -599,16 +672,12 @@ func (r *VPNGatewayReconciler) forbiddenRemoteCIDR(cidr string, servedCIDRs []*n
 			return "reserved"
 		}
 	}
-	for _, f := range r.Config.InternalCIDRs {
+	for _, f := range internalCIDRs {
 		if cidrsOverlap(n, f) {
 			return "cluster-internal"
 		}
 	}
-	for _, f := range servedCIDRs {
-		if cidrsOverlap(n, f) {
-			return "served VPC"
-		}
-	}
+
 	return ""
 }
 
@@ -665,12 +734,12 @@ func (r *VPNGatewayReconciler) servedVPCs(ctx context.Context, gw *sdnv1alpha1.V
 	for _, rf := range refs {
 		if rf.name != "" {
 			vpc := &sdnv1alpha1.VPC{}
-			err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: rf.name}, vpc)
-			if err == nil {
+			err := r.quotaReader().Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: rf.name}, vpc)
+			if err == nil && vpc.DeletionTimestamp.IsZero() && sdnv1alpha1.ValidateVPCCIDRs(vpc.Spec.CIDRs) == nil {
 				vpcs = append(vpcs, vpc)
 				continue
 			}
-			if !apierrors.IsNotFound(err) {
+			if err != nil && !apierrors.IsNotFound(err) {
 				return nil, "", err
 			}
 		}
@@ -718,11 +787,18 @@ func connectionRoutes(conns []sdnv1alpha1.VPNConnection, vpcPorts []string) []sd
 		}
 		routes = append(routes, sdnv1alpha1.VPCGatewayRouteStatus{
 			CIDRs: append([]string(nil), c.Spec.RemoteCIDRs...),
-			Port:  vpcPorts[0],
+			Port:  firstPort(vpcPorts),
 			Ports: append([]string(nil), vpcPorts...),
 		})
 	}
 	return routes
+}
+
+func firstPort(ports []string) string {
+	if len(ports) == 0 {
+		return ""
+	}
+	return ports[0]
 }
 
 // applyIPsecAddressPools adds a selected roadwarrior pool CIDR to the local
@@ -734,16 +810,21 @@ func applyIPsecAddressPools(gw *sdnv1alpha1.VPNGateway, conns []sdnv1alpha1.VPNC
 	}
 	pools := make(map[string]string, len(gw.Spec.IPsec.AddressPools))
 	for _, pool := range gw.Spec.IPsec.AddressPools {
+		if problem := vpnlimits.IPsecPoolNameProblem(pool.Name, true); problem != "" {
+			return fmt.Errorf("%s", problem)
+		}
 		pools[pool.Name] = pool.CIDR
 	}
 	for i := range conns {
 		if conns[i].Spec.IPsec == nil || conns[i].Spec.IPsec.AddressPool == "" {
 			continue
 		}
+		if problem := vpnlimits.IPsecPoolNameProblem(conns[i].Spec.IPsec.AddressPool, false); problem != "" {
+			return fmt.Errorf("%s", problem)
+		}
 		cidr, ok := pools[conns[i].Spec.IPsec.AddressPool]
 		if !ok {
-			return fmt.Errorf("VPNConnection %q selects unknown IPsec address pool %q",
-				conns[i].Name, conns[i].Spec.IPsec.AddressPool)
+			return fmt.Errorf("VPNConnection %q selects an unknown IPsec address pool", conns[i].Name)
 		}
 		if !slices.Contains(conns[i].Spec.RemoteCIDRs, cidr) {
 			conns[i].Spec.RemoteCIDRs = append(append([]string(nil), conns[i].Spec.RemoteCIDRs...), cidr)
@@ -772,6 +853,11 @@ func (r *VPNGatewayReconciler) ensureKeypairs(ctx context.Context, gw *sdnv1alph
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return nil, nil, fmt.Errorf("get keypair secret: %w", getErr)
 	}
+	if getErr == nil {
+		if err := requireVPNOwner(sec, gw); err != nil {
+			return nil, nil, err
+		}
+	}
 	if count < 1 {
 		count = 1
 	}
@@ -787,6 +873,20 @@ func (r *VPNGatewayReconciler) ensureKeypairs(ctx context.Context, gw *sdnv1alph
 		public := string(data[publicName])
 		if i == 0 && private == "" {
 			private, public = string(data["privateKey"]), string(data["publicKey"])
+		}
+		if private != "" {
+			var valid bool
+			private, valid = vpnlimits.WireGuardSecretKey(private)
+			if !valid {
+				return nil, nil, fmt.Errorf("stored WireGuard private key %d has an invalid encoding", i)
+			}
+		}
+		if public != "" {
+			var valid bool
+			public, valid = vpnlimits.WireGuardSecretKey(public)
+			if !valid {
+				return nil, nil, fmt.Errorf("stored WireGuard public key %d has an invalid encoding", i)
+			}
 		}
 		if private != "" && public == "" {
 			parsed, parseErr := wgtypes.ParseKey(private)
@@ -871,6 +971,26 @@ func tunnelMTU(vpcMTU int32, backend string) int {
 // preshared-key Secret).
 func (r *VPNGatewayReconciler) buildWGConfig(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
 	servedVPCs []*sdnv1alpha1.VPC, privateKeys []string, conns []sdnv1alpha1.VPNConnection, mtu int) ([]byte, error) {
+	if len(privateKeys) == 0 || len(privateKeys) > 2 {
+		return nil, fmt.Errorf("WireGuard requires one or two private keys")
+	}
+	for _, key := range privateKeys {
+		if !vpnlimits.WireGuardKey(key) {
+			return nil, fmt.Errorf("WireGuard private key has an invalid encoding")
+		}
+	}
+	for i := range conns {
+		wg := conns[i].Spec.WireGuard
+		if wg == nil {
+			continue
+		}
+		if problem := vpnlimits.WireGuardPeerProblem(vpnlimits.WireGuardPeer{
+			PublicKey: wg.PeerPublicKey, PublicKeys: wg.PeerPublicKeys,
+			Endpoint: wg.PeerEndpoint, Endpoints: wg.PeerEndpoints, Keepalive: int64(wg.PersistentKeepalive),
+		}); problem != "" {
+			return nil, fmt.Errorf("WireGuard peer %d: %s", i, problem)
+		}
+	}
 	type peer struct {
 		Name         string   `json:"name,omitempty"`
 		PublicKey    string   `json:"publicKey"`
@@ -916,6 +1036,11 @@ func (r *VPNGatewayReconciler) buildWGConfig(ctx context.Context, gw *sdnv1alpha
 			if err != nil {
 				return nil, err
 			}
+			var valid bool
+			psk, valid = vpnlimits.WireGuardSecretKey(psk)
+			if !valid {
+				return nil, fmt.Errorf("WireGuard peer %d preshared key has an invalid encoding", i)
+			}
 		}
 		for instance := range peerInstances {
 			publicKey, endpoint := c.Spec.WireGuard.PeerPublicKey, c.Spec.WireGuard.PeerEndpoint
@@ -947,6 +1072,42 @@ func (r *VPNGatewayReconciler) buildWGConfig(ctx context.Context, gw *sdnv1alpha
 // interface.
 func (r *VPNGatewayReconciler) buildIPsecConfig(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
 	servedVPCs []*sdnv1alpha1.VPC, conns []sdnv1alpha1.VPNConnection, mtu int) ([]byte, error) {
+	if gw.Spec.IPsec != nil {
+		if problem := vpnlimits.IPsecScalarProblem("", gw.Spec.IPsec.LocalIdentity); problem != "" {
+			return nil, fmt.Errorf("%s", problem)
+		}
+		if problem := vpnlimits.IPsecProposalProblem(gw.Spec.IPsec.Proposals); problem != "" {
+			return nil, fmt.Errorf("%s", problem)
+		}
+		if len(gw.Spec.IPsec.AddressPools) > vpnlimits.AddressPools {
+			return nil, fmt.Errorf("IPsec address pools exceed 128")
+		}
+		for _, pool := range gw.Spec.IPsec.AddressPools {
+			if problem := vpnlimits.IPsecPoolNameProblem(pool.Name, true); problem != "" {
+				return nil, fmt.Errorf("%s", problem)
+			}
+		}
+	}
+	for i := range conns {
+		if ipsec := conns[i].Spec.IPsec; ipsec != nil {
+			certificate, eap := "", ""
+			if problem := vpnlimits.IPsecPoolNameProblem(ipsec.AddressPool, false); problem != "" {
+				return nil, fmt.Errorf("%s", problem)
+			}
+			if ipsec.Auth.Certificate != nil {
+				certificate = ipsec.Auth.Certificate.RemoteIdentity
+			}
+			if ipsec.Auth.EAP != nil {
+				eap = ipsec.Auth.EAP.Identity
+			}
+			if problem := vpnlimits.IPsecScalarProblem(ipsec.PeerAddress, ipsec.RemoteIdentity, certificate, eap); problem != "" {
+				return nil, fmt.Errorf("%s", problem)
+			}
+			if problem := vpnlimits.IPsecProposalProblem(ipsec.Proposals); problem != "" {
+				return nil, fmt.Errorf("%s", problem)
+			}
+		}
+	}
 	type credentials struct {
 		Certificate string `json:"certificate"`
 		PrivateKey  string `json:"privateKey"`
@@ -1021,6 +1182,8 @@ func (r *VPNGatewayReconciler) buildIPsecConfig(ctx context.Context, gw *sdnv1al
 	if needsCA && cfg.Credentials.CA == "" {
 		return nil, fmt.Errorf("certificate authentication requires ca.crt in the credential Secret or spec.ipsec.trustedCASecretRef")
 	}
+	identities := map[string]string{}
+	ifIDs := map[uint32]string{}
 	for i := range conns {
 		c := &conns[i]
 		if c.Spec.IPsec == nil {
@@ -1040,7 +1203,20 @@ func (r *VPNGatewayReconciler) buildIPsecConfig(ctx context.Context, gw *sdnv1al
 			IfID:        ipsecIfID(c.Name),
 			AddressPool: c.Spec.IPsec.AddressPool,
 		}
+		if previous, exists := ifIDs[p.IfID]; exists {
+			return nil, fmt.Errorf("IPsec interface ID collision between %s and %s", previous, c.Name)
+		}
+		ifIDs[p.IfID] = c.Name
 		if ref := c.Spec.IPsec.Auth.PSKSecretRef; ref != "" {
+			p.RemoteID = c.Spec.IPsec.RemoteIdentity
+			if p.RemoteID == "" {
+				if ip := net.ParseIP(p.PeerAddress); ip != nil {
+					p.RemoteID = ip.String()
+				}
+			}
+			if !exactIKEIdentity(p.RemoteID) {
+				return nil, fmt.Errorf("PSK peer %s requires an exact remoteIdentity or IP peerAddress", c.Name)
+			}
 			psk, err := r.readPSK(ctx, gw.Namespace, ref)
 			if err != nil {
 				return nil, err
@@ -1052,7 +1228,7 @@ func (r *VPNGatewayReconciler) buildIPsecConfig(ctx context.Context, gw *sdnv1al
 			p.RemoteID = auth.RemoteIdentity
 		}
 		if auth := c.Spec.IPsec.Auth.EAP; auth != nil {
-			password, err := r.readSecretValue(ctx, gw.Namespace, auth.SecretRef, "password", "eap")
+			password, err := r.readSecretValueBounded(ctx, gw.Namespace, auth.SecretRef, vpnlimits.IPsecAuthBytes, "password", "eap")
 			if err != nil {
 				return nil, err
 			}
@@ -1060,9 +1236,40 @@ func (r *VPNGatewayReconciler) buildIPsecConfig(ctx context.Context, gw *sdnv1al
 			p.EAPIdentity = auth.Identity
 			p.EAPPassword = password
 		}
+		authMethods := 0
+		if p.PSK != "" {
+			authMethods++
+		}
+		if c.Spec.IPsec.Auth.Certificate != nil {
+			authMethods++
+		}
+		if c.Spec.IPsec.Auth.EAP != nil {
+			authMethods++
+		}
+		if authMethods != 1 {
+			return nil, fmt.Errorf("IPsec peer %s requires exactly one authentication method", c.Name)
+		}
+		identity := p.RemoteID
+		if p.AuthMode == "eap" {
+			identity = p.EAPIdentity
+		}
+		if !exactIKEIdentity(identity) {
+			return nil, fmt.Errorf("IPsec peer %s requires an exact identity", c.Name)
+		}
+		if identity != "" {
+			key := vpnidentity.Key(identity)
+			if previous, exists := identities[key]; exists {
+				return nil, fmt.Errorf("IPsec identity reused by %s and %s", previous, c.Name)
+			}
+			identities[key] = c.Name
+		}
 		cfg.Peers = append(cfg.Peers, p)
 	}
 	return json.Marshal(cfg)
+}
+
+func exactIKEIdentity(identity string) bool {
+	return vpnidentity.Exact(identity)
 }
 
 // routingConfigFor renders the active-active BGP contract; a hub advertises
@@ -1082,9 +1289,17 @@ func routingConfigFor(gw *sdnv1alpha1.VPNGateway, servedVPCs []*sdnv1alpha1.VPC)
 }
 
 func (r *VPNGatewayReconciler) readTLSCredential(ctx context.Context, ns, name string) (cert, key, ca string, err error) {
+	if !vpnlimits.ObjectName(name) {
+		return "", "", "", fmt.Errorf("invalid TLS credential Secret reference")
+	}
 	sec := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, sec); err != nil {
 		return "", "", "", fmt.Errorf("read TLS credential Secret %q: %w", name, err)
+	}
+	for _, field := range []string{corev1.TLSCertKey, corev1.TLSPrivateKeyKey, "ca.crt"} {
+		if len(sec.Data[field]) > vpnlimits.IPsecTLSBytes {
+			return "", "", "", fmt.Errorf("TLS credential exceeds VICI byte limit")
+		}
 	}
 	cert = string(sec.Data[corev1.TLSCertKey])
 	key = string(sec.Data[corev1.TLSPrivateKeyKey])
@@ -1097,18 +1312,31 @@ func (r *VPNGatewayReconciler) readTLSCredential(ctx context.Context, ns, name s
 }
 
 func (r *VPNGatewayReconciler) readSecretValue(ctx context.Context, ns, name string, keys ...string) (string, error) {
+	return r.readSecretValueBounded(ctx, ns, name, vpnlimits.IPsecTLSBytes, keys...)
+}
+
+func (r *VPNGatewayReconciler) readSecretValueBounded(ctx context.Context, ns, name string, maxBytes int, keys ...string) (string, error) {
+	if !vpnlimits.ObjectName(name) {
+		return "", fmt.Errorf("invalid Secret reference")
+	}
 	sec := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, sec); err != nil {
 		return "", fmt.Errorf("read Secret %q: %w", name, err)
 	}
 	for _, key := range keys {
-		if value := string(sec.Data[key]); value != "" {
-			return value, nil
+		if value := sec.Data[key]; len(value) != 0 {
+			if len(value) > maxBytes {
+				return "", fmt.Errorf("Secret credential exceeds byte limit")
+			}
+			return string(value), nil
 		}
 	}
 	if len(sec.Data) == 1 {
 		for _, value := range sec.Data {
 			if len(value) > 0 {
+				if len(value) > maxBytes {
+					return "", fmt.Errorf("Secret credential exceeds byte limit")
+				}
 				return string(value), nil
 			}
 		}
@@ -1128,7 +1356,7 @@ func ipsecStartAction(spec *sdnv1alpha1.VPNConnectionIPsec) string {
 
 // ipsecIfID maps a connection name to a stable, non-zero 32-bit xfrm if_id (the
 // SA ⇄ xfrm-interface binding). A hash keeps it stable across reconciles; a
-// handful of peers makes a collision negligible.
+// collisions are rejected before the configuration is installed.
 func ipsecIfID(name string) uint32 {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(name))
@@ -1143,7 +1371,7 @@ func ipsecIfID(name string) uint32 {
 // key is taken from the conventional "psk" or "presharedKey" data key, or the
 // Secret's sole entry when it has exactly one.
 func (r *VPNGatewayReconciler) readPSK(ctx context.Context, ns, name string) (string, error) {
-	value, err := r.readSecretValue(ctx, ns, name, "psk", "presharedKey")
+	value, err := r.readSecretValueBounded(ctx, ns, name, vpnlimits.IPsecAuthBytes, "psk", "presharedKey")
 	if err != nil {
 		return "", fmt.Errorf("read preshared-key %w", err)
 	}
@@ -1192,6 +1420,9 @@ func (r *VPNGatewayReconciler) ensureConfigSecret(ctx context.Context, gw *sdnv1
 	case err != nil:
 		return "", fmt.Errorf("get config secret: %w", err)
 	default:
+		if err := requireVPNOwner(existing, gw); err != nil {
+			return "", err
+		}
 		if !equality.Semantic.DeepEqual(existing.Data, desired.Data) {
 			existing.Data = desired.Data
 			if err := r.Update(ctx, existing); err != nil {
@@ -1257,6 +1488,9 @@ func (r *VPNGatewayReconciler) ensureBindings(ctx context.Context, gw *sdnv1alph
 		case err != nil:
 			return fmt.Errorf("get VPCBinding: %w", err)
 		default:
+			if err := requireVPNOwner(existing, gw); err != nil {
+				return err
+			}
 			if !equality.Semantic.DeepEqual(existing.Spec, desired.Spec) {
 				existing.Spec = desired.Spec
 				if err := r.Update(ctx, existing); err != nil {
@@ -1288,19 +1522,27 @@ func vpnBindingName(gateway, vpc string, primary bool) string {
 // pruneVPCBindings deletes this gateway's bindings not named in keep (all of
 // them when keep is nil), so a VPC removed from the served set loses its grant.
 func (r *VPNGatewayReconciler) pruneVPCBindings(ctx context.Context, gw *sdnv1alpha1.VPNGateway, keep map[string]bool) error {
-	var list sdnv1alpha1.VPCBindingList
-	if err := r.List(ctx, &list, client.InNamespace(gw.Namespace), client.MatchingLabels{vpnGatewayLabel: gw.Name}); err != nil {
-		return fmt.Errorf("list VPN forwarding-grant VPCBindings: %w", err)
-	}
-	for i := range list.Items {
-		if keep[list.Items[i].Name] {
-			continue
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	continuation := ""
+	for {
+		var list sdnv1alpha1.VPCBindingList
+		if err := r.quotaReader().List(ctx, &list, client.InNamespace(gw.Namespace), client.MatchingLabels{vpnGatewayLabel: gw.Name}, client.Limit(200), client.Continue(continuation)); err != nil {
+			return fmt.Errorf("list VPN forwarding-grant VPCBindings: %w", err)
 		}
-		if err := r.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete stale VPN VPCBinding %q: %w", list.Items[i].Name, err)
+		for i := range list.Items {
+			if keep[list.Items[i].Name] {
+				continue
+			}
+			if err := r.deleteVPNOwned(ctx, gw, &list.Items[i]); err != nil {
+				return fmt.Errorf("delete stale VPN binding: %w", err)
+			}
 		}
+		if list.Continue == "" {
+			return nil
+		}
+		continuation = list.Continue
 	}
-	return nil
 }
 
 // vpnAttachmentAnnotations requests the appliance's VPC leg(s). A single-VPC
@@ -1334,12 +1576,12 @@ func (r *VPNGatewayReconciler) ensureApplianceWorkload(ctx context.Context, gw *
 		return r.ensureVirtualMachine(ctx, gw, backend, checksum)
 	}
 	vm := vpnVirtualMachineObject(gw.Namespace, gw.Name+"-vpn")
-	if err := r.Delete(ctx, vm); err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+	if err := r.deleteVPNOwned(ctx, gw, vm); err != nil {
 		return fmt.Errorf("delete VM appliance before pod mode: %w", err)
 	}
 	if haMode(gw) == sdnv1alpha1.VPNGatewayHAModeActiveActive {
 		deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-vpn", Namespace: gw.Namespace}}
-		if err := r.Delete(ctx, deployment); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.deleteVPNOwned(ctx, gw, deployment); err != nil {
 			return fmt.Errorf("delete deployment before active-active mode: %w", err)
 		}
 		if err := r.ensureHeadlessService(ctx, gw); err != nil {
@@ -1348,11 +1590,11 @@ func (r *VPNGatewayReconciler) ensureApplianceWorkload(ctx context.Context, gw *
 		return r.ensureStatefulSet(ctx, gw, backend, checksum)
 	}
 	statefulSet := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-vpn", Namespace: gw.Namespace}}
-	if err := r.Delete(ctx, statefulSet); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.deleteVPNOwned(ctx, gw, statefulSet); err != nil {
 		return fmt.Errorf("delete active-active appliance before deployment mode: %w", err)
 	}
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-vpn-headless", Namespace: gw.Namespace}}
-	if err := r.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.deleteVPNOwned(ctx, gw, service); err != nil {
 		return fmt.Errorf("delete active-active headless service: %w", err)
 	}
 	return r.ensureDeployment(ctx, gw, backend, checksum)
@@ -1365,7 +1607,7 @@ func (r *VPNGatewayReconciler) deletePodAppliance(ctx context.Context, gw *sdnv1
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-vpn-headless", Namespace: gw.Namespace}},
 	}
 	for _, object := range objects {
-		if err := r.Delete(ctx, object); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.deleteVPNOwned(ctx, gw, object); err != nil {
 			return fmt.Errorf("delete pod appliance %s: %w", object.GetName(), err)
 		}
 	}
@@ -1390,6 +1632,9 @@ func (r *VPNGatewayReconciler) ensureVirtualMachine(ctx context.Context, gw *sdn
 	case err != nil:
 		return fmt.Errorf("get KubeVirt VPN appliance: %w", err)
 	default:
+		if err := requireVPNOwner(existing, gw); err != nil {
+			return err
+		}
 		if !equality.Semantic.DeepEqual(existing.Object["spec"], desired.Object["spec"]) ||
 			!equality.Semantic.DeepEqual(existing.GetLabels(), desired.GetLabels()) ||
 			!equality.Semantic.DeepEqual(existing.GetOwnerReferences(), desired.GetOwnerReferences()) {
@@ -1403,7 +1648,7 @@ func (r *VPNGatewayReconciler) ensureVirtualMachine(ctx context.Context, gw *sdn
 			// guest. Recreate that guest so a rotated peer/credential is actually
 			// consumed from cloud-init; the persistent Port remains stable.
 			vmi := vpnVirtualMachineInstanceObject(gw.Namespace, desired.GetName())
-			if err := r.Delete(ctx, vmi); err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+			if err := r.deleteVPNOwned(ctx, existing, vmi); err != nil {
 				return fmt.Errorf("restart KubeVirt VPN appliance after config update: %w", err)
 			}
 		}
@@ -1490,6 +1735,9 @@ func (r *VPNGatewayReconciler) ensureDeployment(ctx context.Context, gw *sdnv1al
 	case err != nil:
 		return fmt.Errorf("get appliance deployment: %w", err)
 	default:
+		if err := requireVPNOwner(existing, gw); err != nil {
+			return err
+		}
 		if !equality.Semantic.DeepDerivative(desired.Spec.Template.Spec.Containers, existing.Spec.Template.Spec.Containers) ||
 			!equality.Semantic.DeepDerivative(desired.Spec.Template.Annotations, existing.Spec.Template.Annotations) ||
 			!equality.Semantic.DeepEqual(desired.Spec.Replicas, existing.Spec.Replicas) ||
@@ -1527,6 +1775,9 @@ func (r *VPNGatewayReconciler) ensureHeadlessService(ctx context.Context, gw *sd
 	case err != nil:
 		return fmt.Errorf("get active-active headless service: %w", err)
 	default:
+		if err := requireVPNOwner(existing, gw); err != nil {
+			return err
+		}
 		if !equality.Semantic.DeepEqual(existing.Spec.Selector, desired.Spec.Selector) ||
 			existing.Spec.PublishNotReadyAddresses != desired.Spec.PublishNotReadyAddresses {
 			existing.Spec.Selector = desired.Spec.Selector
@@ -1554,6 +1805,9 @@ func (r *VPNGatewayReconciler) ensureStatefulSet(ctx context.Context, gw *sdnv1a
 	case err != nil:
 		return fmt.Errorf("get active-active appliance StatefulSet: %w", err)
 	default:
+		if err := requireVPNOwner(existing, gw); err != nil {
+			return err
+		}
 		if !equality.Semantic.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas) ||
 			!equality.Semantic.DeepEqual(existing.Spec.Template, desired.Spec.Template) ||
 			existing.Spec.ServiceName != desired.Spec.ServiceName ||
@@ -1744,39 +1998,61 @@ func ptrIntStr(i int32) *intstr.IntOrString {
 // empty until the CNI has minted the Port.
 func (r *VPNGatewayReconciler) resolveAppliancePort(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
 	vpc *sdnv1alpha1.VPC) (portName, ip, statusIP string) {
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(gw.Namespace),
-		client.MatchingLabels{vpnGatewayLabel: gw.Name}); err != nil {
+	choices := r.resolveAppliancePorts(ctx, gw, vpc, 1)
+	if len(choices) == 0 {
 		return "", "", ""
 	}
-	live := map[string]string{}
-	for i := range pods.Items {
-		if pods.Items[i].DeletionTimestamp == nil && podReady(&pods.Items[i]) {
-			live[pods.Items[i].Namespace+"/"+pods.Items[i].Name] = pods.Items[i].Status.PodIP
+	return choices[0].Port, choices[0].IP, choices[0].StatusIP
+}
+
+// Follow the expected workload chain to the current gateway; matching labels
+// alone must not let another pod become a tunnel endpoint.
+func (r *VPNGatewayReconciler) appliancePodOwned(ctx context.Context, gw *sdnv1alpha1.VPNGateway, pod *corev1.Pod) bool {
+	ref := metav1.GetControllerOf(pod)
+	if ref == nil || ref.UID == "" {
+		return false
+	}
+	var workload client.Object
+	switch haMode(gw) {
+	case sdnv1alpha1.VPNGatewayHAModeActiveActive:
+		if ref.Kind != "StatefulSet" || ref.APIVersion != "apps/v1" {
+			return false
 		}
-	}
-	var ports sdnv1alpha1.PortList
-	if err := r.List(ctx, &ports, client.MatchingLabels{
-		sdnv1alpha1.LabelVPCNamespace: gw.Namespace,
-		sdnv1alpha1.LabelVPC:          vpc.Name,
-	}); err != nil {
-		return "", "", ""
-	}
-	var best *sdnv1alpha1.Port
-	for i := range ports.Items {
-		p := &ports.Items[i]
-		if _, ok := live[p.Spec.PodNamespace+"/"+p.Spec.PodName]; !ok {
-			continue
+		workload = &appsv1.StatefulSet{}
+	case sdnv1alpha1.VPNGatewayHAModeLiveMigration:
+		if ref.Kind != "VirtualMachineInstance" || ref.APIVersion != "kubevirt.io/v1" {
+			return false
 		}
-		if best == nil || p.CreationTimestamp.Before(&best.CreationTimestamp) ||
-			(p.CreationTimestamp.Equal(&best.CreationTimestamp) && p.Name < best.Name) {
-			best = p
+		vmi := vpnVirtualMachineInstanceObject(gw.Namespace, ref.Name)
+		if err := r.Get(ctx, client.ObjectKeyFromObject(vmi), vmi); err != nil || vmi.GetUID() != ref.UID || vmi.GetDeletionTimestamp() != nil {
+			return false
 		}
+		ref = metav1.GetControllerOf(vmi)
+		if ref == nil || ref.Kind != "VirtualMachine" || ref.APIVersion != "kubevirt.io/v1" {
+			return false
+		}
+		workload = vpnVirtualMachineObject(gw.Namespace, ref.Name)
+	default:
+		if ref.Kind != "ReplicaSet" || ref.APIVersion != "apps/v1" {
+			return false
+		}
+		rs := &appsv1.ReplicaSet{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: ref.Name}, rs); err != nil || rs.UID != ref.UID || rs.DeletionTimestamp != nil {
+			return false
+		}
+		ref = metav1.GetControllerOf(rs)
+		if ref == nil || ref.Kind != "Deployment" || ref.APIVersion != "apps/v1" {
+			return false
+		}
+		workload = &appsv1.Deployment{}
 	}
-	if best == nil {
-		return "", "", ""
+	if ref.UID == "" || ref.Name != gw.Name+"-vpn" {
+		return false
 	}
-	return best.Name, best.Spec.IP, live[best.Spec.PodNamespace+"/"+best.Spec.PodName]
+	if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: ref.Name}, workload); err != nil {
+		return false
+	}
+	return workload.GetUID() == ref.UID && workload.GetDeletionTimestamp() == nil && requireVPNOwner(workload, gw) == nil
 }
 
 type applianceResolution struct {
@@ -1789,35 +2065,51 @@ type applianceResolution struct {
 
 func (r *VPNGatewayReconciler) resolveAppliancePorts(ctx context.Context, gw *sdnv1alpha1.VPNGateway,
 	vpc *sdnv1alpha1.VPC, limit int) []applianceResolution {
+	if limit <= 0 || ctx.Err() != nil {
+		return nil
+	}
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(gw.Namespace),
 		client.MatchingLabels{vpnGatewayLabel: gw.Name}); err != nil {
 		return nil
 	}
-	live := map[string]string{}
+	live := map[string]*corev1.Pod{}
 	for i := range pods.Items {
-		if pods.Items[i].DeletionTimestamp == nil && podReady(&pods.Items[i]) {
-			live[pods.Items[i].Namespace+"/"+pods.Items[i].Name] = pods.Items[i].Status.PodIP
+		if pods.Items[i].DeletionTimestamp == nil && podReady(&pods.Items[i]) && r.appliancePodOwned(ctx, gw, &pods.Items[i]) {
+			live[pods.Items[i].Namespace+"/"+pods.Items[i].Name] = &pods.Items[i]
 		}
-	}
-	var ports sdnv1alpha1.PortList
-	if err := r.List(ctx, &ports, client.MatchingLabels{
-		sdnv1alpha1.LabelVPCNamespace: gw.Namespace,
-		sdnv1alpha1.LabelVPC:          vpc.Name,
-	}); err != nil {
-		return nil
 	}
 	var out []applianceResolution
-	for i := range ports.Items {
-		port := &ports.Items[i]
-		statusIP, ok := live[port.Spec.PodNamespace+"/"+port.Spec.PodName]
-		if !ok || port.Spec.IP == "" || statusIP == "" {
-			continue
+	sandboxes := podSandboxSnapshot{}
+	for key, pod := range live {
+		if ctx.Err() != nil {
+			return nil
 		}
-		out = append(out, applianceResolution{
-			Port: port.Name, IP: port.Spec.IP, StatusIP: statusIP,
-			PodName: port.Spec.PodName, CreatedAt: port.CreationTimestamp,
-		})
+		sandbox, err := sandboxes.forPod(ctx, r.Client, pod)
+		if err != nil {
+			return nil
+		}
+		var ports sdnv1alpha1.PortList
+		if err := r.List(ctx, &ports, client.MatchingFields{vpnAppliancePodIndex: key}, client.MatchingLabels{
+			sdnv1alpha1.LabelVPCNamespace: gw.Namespace,
+			sdnv1alpha1.LabelVPC:          vpc.Name,
+		}); err != nil {
+			return nil
+		}
+		for i := range ports.Items {
+			port := &ports.Items[i]
+			if port.Spec.PodNamespace != pod.Namespace || port.Spec.PodName != pod.Name ||
+				!currentNextHopClaim(port, vpc, pod) || !nextHopSandboxMatches(port, sandbox) || pod.Status.PodIP == "" {
+				continue
+			}
+			out = append(out, applianceResolution{
+				Port: port.Name, IP: port.Spec.IP, StatusIP: pod.Status.PodIP,
+				PodName: port.Spec.PodName, CreatedAt: port.CreationTimestamp,
+			})
+		}
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 	sortApplianceResolutions(out, haMode(gw) == sdnv1alpha1.VPNGatewayHAModeActiveActive)
 	if len(out) > limit {
@@ -1873,19 +2165,26 @@ func (r *VPNGatewayReconciler) resolveVPCLegPorts(ctx context.Context, gw *sdnv1
 // readApplianceStatus reads a small, secret-free JSON snapshot directly from
 // the selected pod. It deliberately does not route through the tenant network.
 func (r *VPNGatewayReconciler) readApplianceStatus(ctx context.Context, podIP, backend string) (*vpnstatus.Snapshot, error) {
-	if podIP == "" {
-		return nil, fmt.Errorf("selected appliance pod has no PodIP")
+	if net.ParseIP(podIP) == nil {
+		return nil, fmt.Errorf("selected appliance pod has no valid PodIP")
 	}
 	client := r.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Second}
+	}
+	// A compromised appliance must not redirect the privileged controller to
+	// unrelated cluster services or external URLs.
+	boundedClient := *client
+	boundedClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	if boundedClient.Timeout <= 0 || boundedClient.Timeout > 2*time.Second {
+		boundedClient.Timeout = 2 * time.Second
 	}
 	url := "http://" + net.JoinHostPort(podIP, "9410") + "/status"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build appliance status request: %w", err)
 	}
-	resp, err := client.Do(req)
+	resp, err := boundedClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("read appliance status: %w", err)
 	}
@@ -1982,6 +2281,9 @@ func (r *VPNGatewayReconciler) ensureFloatingIPNamed(ctx context.Context, gw *sd
 	case err != nil:
 		return "", fmt.Errorf("get FloatingIP: %w", err)
 	}
+	if err := requireVPNOwner(existing, gw); err != nil {
+		return "", err
+	}
 	if !equality.Semantic.DeepEqual(existing.Spec, desired.Spec) {
 		existing.Spec = desired.Spec
 		if err := r.Update(ctx, existing); err != nil {
@@ -2000,7 +2302,7 @@ func (r *VPNGatewayReconciler) pruneFloatingIPs(ctx context.Context, gw *sdnv1al
 		if keep[list.Items[i].Name] {
 			continue
 		}
-		if err := r.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.deleteVPNOwned(ctx, gw, &list.Items[i]); err != nil {
 			return fmt.Errorf("delete stale VPN endpoint FloatingIP %q: %w", list.Items[i].Name, err)
 		}
 	}
@@ -2186,6 +2488,18 @@ func timePtrEqual(a, b *metav1.Time) bool {
 // SetupWithManager wires the controller: VPNGateway drives it; VPNConnections,
 // the appliance's Port and Pod, and owned objects re-enqueue their gateway.
 func (r *VPNGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// VPCGateway setup registers the shared Port pod index first in main.
+	for _, obj := range []client.Object{&sdnv1alpha1.VPNGateway{}, &sdnv1alpha1.VPNConnection{}} {
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), obj, vpnCredentialIndex, vpnCredentialKeys); err != nil {
+			return err
+		}
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sdnv1alpha1.VPNGateway{}, gatewayVPCIndex, gatewayVPCKeys); err != nil {
+		return err
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sdnv1alpha1.VPNConnection{}, vpnConnectionGatewayIndex, vpnConnectionGatewayKeys); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sdnv1alpha1.VPNGateway{}).
 		Owns(&appsv1.Deployment{}).
@@ -2193,29 +2507,69 @@ func (r *VPNGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&sdnv1alpha1.VPCBinding{}).
 		Owns(&sdnv1alpha1.FloatingIP{}).
-		Watches(&sdnv1alpha1.VPNConnection{}, handler.EnqueueRequestsFromMapFunc(r.mapConnectionToGateway)).
+		Watches(&sdnv1alpha1.VPC{}, handler.EnqueueRequestsFromMapFunc(r.mapVPCToVPNGateways)).
+		Watches(&sdnv1alpha1.VPNConnection{}, handler.EnqueueRequestsFromMapFunc(r.mapConnectionToGateway), builder.WithPredicates(vpnConnectionEvents())).
 		Watches(&sdnv1alpha1.Port{}, handler.EnqueueRequestsFromMapFunc(r.mapPortToVPNGateways)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToVPNGateways)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapCredentialToVPNGateways)).
 		Named("vpngateway").
 		Complete(r)
 }
 
+// Credentials may be tenant-owned, so Owns(Secret) alone cannot observe their
+// deletion or rotation. Reconcile every gateway consuming the changed Secret.
+func (r *VPNGatewayReconciler) mapCredentialToVPNGateways(ctx context.Context, obj client.Object) []ctrl.Request {
+	var gateways sdnv1alpha1.VPNGatewayList
+	var connections sdnv1alpha1.VPNConnectionList
+	if err := r.List(ctx, &gateways, client.InNamespace(obj.GetNamespace()), client.MatchingFields{vpnCredentialIndex: obj.GetName()}); err != nil {
+		return nil
+	}
+	if err := r.List(ctx, &connections, client.InNamespace(obj.GetNamespace()), client.MatchingFields{vpnCredentialIndex: obj.GetName()}); err != nil {
+		return nil
+	}
+	consumers := map[string]*sdnv1alpha1.VPNGateway{}
+	lookedUp := map[string]bool{}
+	for i := range gateways.Items {
+		gw := &gateways.Items[i]
+		consumers[gw.Name] = gw
+		lookedUp[gw.Name] = true
+	}
+	for i := range connections.Items {
+		conn := &connections.Items[i]
+		name := conn.Spec.GatewayRef.Name
+		if !vpnlimits.ObjectName(name) || lookedUp[name] {
+			continue
+		}
+		lookedUp[name] = true
+		gw := &sdnv1alpha1.VPNGateway{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: conn.Namespace, Name: name}, gw); err == nil {
+			consumers[name] = gw
+		}
+	}
+	var requests []ctrl.Request
+	for _, gw := range consumers {
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(gw)})
+	}
+	return requests
+}
+
 func (r *VPNGatewayReconciler) mapConnectionToGateway(ctx context.Context, obj client.Object) []ctrl.Request {
 	conn, ok := obj.(*sdnv1alpha1.VPNConnection)
-	if !ok || conn.Spec.GatewayRef.Name == "" {
+	if !ok || !vpnlimits.ObjectName(conn.Spec.GatewayRef.Name) {
 		return nil
 	}
 	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: conn.Namespace, Name: conn.Spec.GatewayRef.Name}}}
 }
 
-// mapPortToVPNGateways re-enqueues the gateways of the Port's VPC namespace when
+// mapPortToVPNGateways re-enqueues the gateways of the Port's VPC when
 // an appliance Port appears or moves.
 func (r *VPNGatewayReconciler) mapPortToVPNGateways(ctx context.Context, obj client.Object) []ctrl.Request {
 	ns := obj.GetLabels()[sdnv1alpha1.LabelVPCNamespace]
-	if ns == "" {
+	name := obj.GetLabels()[sdnv1alpha1.LabelVPC]
+	if ns == "" || name == "" {
 		return nil
 	}
-	return r.vpnGatewaysIn(ctx, ns)
+	return r.vpnGatewaysIn(ctx, ns, name)
 }
 
 // mapPodToVPNGateways re-enqueues the gateway that owns an appliance pod.
@@ -2227,9 +2581,9 @@ func (r *VPNGatewayReconciler) mapPodToVPNGateways(ctx context.Context, obj clie
 	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}}}
 }
 
-func (r *VPNGatewayReconciler) vpnGatewaysIn(ctx context.Context, namespace string) []ctrl.Request {
+func (r *VPNGatewayReconciler) vpnGatewaysIn(ctx context.Context, namespace, vpcName string) []ctrl.Request {
 	var list sdnv1alpha1.VPNGatewayList
-	if err := r.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(namespace), client.MatchingFields{gatewayVPCIndex: vpcName}); err != nil {
 		return nil
 	}
 	out := make([]ctrl.Request, 0, len(list.Items))
@@ -2237,4 +2591,8 @@ func (r *VPNGatewayReconciler) vpnGatewaysIn(ctx context.Context, namespace stri
 		out = append(out, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
 	}
 	return out
+}
+
+func (r *VPNGatewayReconciler) mapVPCToVPNGateways(ctx context.Context, obj client.Object) []ctrl.Request {
+	return r.vpnGatewaysIn(ctx, obj.GetNamespace(), obj.GetName())
 }

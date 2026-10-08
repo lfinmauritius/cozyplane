@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // VPCRef references a VPC by namespace and name. The namespace is the VPC
@@ -101,12 +102,26 @@ type PortStatus struct {
 	// VPC) this Port is a member of, resolved by the controller from the pod's
 	// labels. The agent folds it into the datapath membership bitmap. Empty
 	// means "no groups" — legacy allow-all intra-VPC ingress.
-	// [0] alone means a selected SG is pending/invalid: deny new SG-gated
-	// TCP/UDP admissions until all selected group IDs are resolved. It is not
-	// full protocol quarantine. All agents must support this before activation.
+	// Zero denotes a selected group awaiting allocation: default-deny without
+	// granting rules. Resolved groups still union their permissions normally.
 	// +optional
 	// +listType=atomic
 	Groups []int32 `json:"groups,omitempty"`
+
+	// GroupRefs proves the current SecurityGroup UID behind each allocated ID.
+	// +optional
+	// +listType=atomic
+	GroupRefs []SecurityGroupMembership `json:"groupRefs,omitempty"`
+	// GroupPodUID identifies the pod whose labels resolved this membership.
+	// +optional
+	GroupPodUID types.UID `json:"groupPodUID,omitempty"`
+}
+
+// SecurityGroupMembership prevents a recycled numeric ID from granting the
+// permissions of a replacement group to predecessor Ports.
+type SecurityGroupMembership struct {
+	ID  int32     `json:"id"`
+	UID types.UID `json:"uid"`
 }
 
 // +genclient

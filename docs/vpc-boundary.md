@@ -1,3 +1,7 @@
+> Validation scope: lab results and earlier source hashes below describe their
+> original branches. They do not certify this combined integration. Its current
+> build, race, kernel and deployment checks are recorded separately.
+
 # Operator-managed VPC boundaries
 
 This extension adds an optional boundary to VPCs without changing legacy VPC

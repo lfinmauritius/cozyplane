@@ -174,3 +174,28 @@ func TestPlanTCXEmpty(t *testing.T) {
 		t.Errorf("stale = %v, want empty", got.stale)
 	}
 }
+
+func TestPodHookNeedsReconcile(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		own      int
+		programs int
+		first    bool
+		want     bool
+	}{
+		{name: "only hook missing", own: -1, programs: 0, want: true},
+		{name: "last missing", own: -1, programs: 2, want: true},
+		{name: "last too early", own: 0, programs: 3, want: true},
+		{name: "already last", own: 2, programs: 3, want: false},
+		{name: "first missing", own: -1, programs: 2, first: true, want: true},
+		{name: "first too late", own: 2, programs: 3, first: true, want: true},
+		{name: "already first", own: 0, programs: 3, first: true, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := !tcxOrderOK(tc.own, tc.programs, tc.first)
+			if got != tc.want {
+				t.Fatalf("needs reconcile = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

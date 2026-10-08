@@ -77,11 +77,11 @@ func TestActiveActiveWireGuardConfigUsesPairedPeers(t *testing.T) {
 	conn := sdnv1alpha1.VPNConnection{ObjectMeta: metav1.ObjectMeta{Name: "remote"}, Spec: sdnv1alpha1.VPNConnectionSpec{
 		RemoteCIDRs: []string{"10.251.0.0/24"},
 		WireGuard: &sdnv1alpha1.VPNConnectionWireGuard{
-			PeerPublicKeys: []string{"peer-key-0", "peer-key-1"},
+			PeerPublicKeys: []string{"AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
 			PeerEndpoints:  []string{"192.0.2.10:51820", "192.0.2.11:51820"},
 		},
 	}}
-	raw, err := r.buildWGConfig(context.Background(), gw, []*sdnv1alpha1.VPC{{}}, []string{"private-0", "private-1"}, []sdnv1alpha1.VPNConnection{conn}, 1320)
+	raw, err := r.buildWGConfig(context.Background(), gw, []*sdnv1alpha1.VPC{{}}, []string{"AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}, []sdnv1alpha1.VPNConnection{conn}, 1320)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestActiveActiveWireGuardConfigUsesPairedPeers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(cfg.PrivateKeys) != 2 || len(cfg.PeerInstances) != 2 ||
-		cfg.PeerInstances[0][0].PublicKey != "peer-key-0" || cfg.PeerInstances[1][0].Endpoint != "192.0.2.11:51820" {
+		cfg.PeerInstances[0][0].PublicKey != "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" || cfg.PeerInstances[1][0].Endpoint != "192.0.2.11:51820" {
 		t.Fatalf("unexpected active-active WireGuard config: %+v", cfg)
 	}
 }
