@@ -99,8 +99,8 @@ func main() {
 		vpcDNS              bool
 		clusterDNSIPs       string
 		floatingNextHopIPv4 string
-		metricsAddr string
-		metricsSecure bool
+		metricsAddr         string
+		metricsSecure       bool
 	)
 	flag.IntVar(&mtu, "mtu", 1450, "pod MTU (underlay MTU minus Geneve overhead)")
 	flag.UintVar(&vni, "vni", uint(datapath.DefaultVNI), "VNI for the default network")
@@ -137,17 +137,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := run(nodeName, mtu, uint32(vni), cniConfName, writeCNI, uint16(genevePort), clusterCIDR, internalCIDRs, masqMode, vpcDNS, clusterDNSIPs, floatingNextHopIPv4, log); err != nil {
-		metricsAddr string
-		metricsSecure bool
+	if err := run(nodeName, mtu, uint32(vni), cniConfName, writeCNI, uint16(genevePort), clusterCIDR, internalCIDRs, masqMode, vpcDNS, clusterDNSIPs, floatingNextHopIPv4, metricsAddr, metricsSecure, log); err != nil {
 		log.Error("agent failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(nodeName string, mtu int, vni uint32, cniConfName string, writeCNI bool, genevePort uint16, clusterCIDR, internalCIDRs, masqMode string, vpcDNS bool, clusterDNSIPs, floatingNextHopIPv4 string, log *slog.Logger) error {
-		metricsAddr string
-		metricsSecure bool
+func run(nodeName string, mtu int, vni uint32, cniConfName string, writeCNI bool, genevePort uint16, clusterCIDR, internalCIDRs, masqMode string, vpcDNS bool, clusterDNSIPs, floatingNextHopIPv4, metricsAddr string, metricsSecure bool, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
