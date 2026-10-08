@@ -51,6 +51,11 @@ func TestPortValidate(t *testing.T) {
 		{"not an IP", mkPort("v5.bogus", "bogus"), false},
 		{"non-canonical v6", mkPort("v5.fd00-0a--2", "fd00:0a::2"), false},
 		{"v4-mapped spelling", mkPort("v5.--ffff-10-0-0-2", "::ffff:10.0.0.2"), false},
+		{"reserved bridge", mkPort(sdn.PortName(100, "169.254.1.1"), "169.254.1.1"), false},
+		{"reserved hairpin", mkPort(sdn.PortName(100, "169.254.42.1"), "169.254.42.1"), false},
+		{"reserved v6 bridge", mkPort(sdn.PortName(100, "fe80::1"), "fe80::1"), false},
+		{"reserved v6 hairpin", mkPort(sdn.PortName(100, "fe80::2a:1"), "fe80::2a:1"), false},
+		{"reserved RFC6052", mkPort(sdn.PortName(100, "64:ff9b::a9fe:101"), "64:ff9b::a9fe:101"), false},
 	}
 	for _, c := range cases {
 		errs := s.Validate(context.Background(), c.port)

@@ -71,12 +71,22 @@ const (
 	// cfgGenevePort is the overlay's UDP port (host order) — the host
 	// firewall's transport exemption (docs/host-firewall.md).
 	cfgGenevePort = uint32(8)
-	// cfgHFEnabled arms host-firewall enforcement: 1 while a HostFirewall
-	// selects this node (set after the rule sync, cleared before the wipe).
+	// cfgHFEnabled: 0 disabled, 1 complete rules, 2 temporary default-deny
+	// during updates or after a failed sync.
 	cfgHFEnabled = uint32(9)
 	// cfgHFEgEnabled arms host-firewall EGRESS: the node's own new flows are
 	// default-deny (node→node and node→local-pod stay exempt).
 	cfgHFEgEnabled = uint32(10)
+	// cfgFlowEnabled arms flow observability (docs/observability.md): every
+	// flow_emit site pays one params lookup while it is off.
+	cfgFlowEnabled = uint32(11)
+	// A nonzero policy guard denies new gated flows until the entire policy
+	// snapshot (including endpoint identities) has synced successfully.
+	cfgNPUpdating = uint32(12)
+	cfgSGUpdating = uint32(13)
+	// Go-owned initialization witnesses within the existing 16-slot array.
+	cfgNPInitialized = uint32(14)
+	cfgSGInitialized = uint32(15)
 )
 
 // ResolverPort is the port the split-horizon resolver binds on the node
@@ -106,9 +116,18 @@ const PortGatewayFlag uint32 = 1 << 31
 // bpf/overlay.c.
 const PortForwardFlag uint32 = 1 << 30
 
+// PortForwardScopedFlag narrows PortForwardFlag to declared prefixes
+// (VPCBinding.forwardingCIDRs, issue #6): a foreign source is admitted only if
+// it matches the port's fwd_cidrs allowlist. The CNI sets it when the binding
+// names CIDRs; clear means the legacy all-foreign behaviour. Must match
+// PORT_F_FWD_SCOPED in bpf/overlay.c.
+const PortForwardScopedFlag uint32 = 1 << 29
+
 // PortNet strips the flag bits from a ports-map value, yielding the network id
 // (the locals/remotes scope). Mirrors PORT_NET in bpf/overlay.c.
-func PortNet(v uint32) uint32 { return v &^ (PortGatewayFlag | PortForwardFlag) }
+func PortNet(v uint32) uint32 {
+	return v &^ (PortGatewayFlag | PortForwardFlag | PortForwardScopedFlag)
+}
 
 // QuarantineNet is a reserved network id assigned to a pod's ports-map entry to
 // sever it: no VPC CIDR is ever programmed into the networks map with this id

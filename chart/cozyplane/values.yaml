@@ -16,6 +16,10 @@ genevePort: 6081
 # as Cilium (which ships 05-cilium.conflist).
 cniConfName: "10-cozyplane.conflist"
 
+# Let the agent write the standalone cozyplane conflist. Set false when the
+# platform owns a chained conflist (for example cozyplane followed by Cilium).
+cniConfEnabled: true
+
 # Kube-apiserver endpoint the hostNetwork agent/responder dial. Empty = the
 # in-cluster kubernetes.default ClusterIP (10.96.0.1) — correct once a service
 # proxy serves it. When cozyplane is the CNI AND there is no kube-proxy, that
@@ -50,8 +54,65 @@ egress:
   # (:53 only), so tenant pods resolve with a stock resolv.conf.
   clusterDNS: "10.96.0.10"
   # Additional cluster-internal networks VPC tenants must not reach through
-  # their gateways (e.g. the node/management network).
+  # their gateways (e.g. the node/management network). Also feeds the managed-VPN
+  # route-CIDR deny-set (a tenant may not tunnel one of these) — include the NODE
+  # network here so the deny-set covers it.
   internalCIDRs: []
+
+# Managed VPN (issue #6, docs/vpn.md). The controller runs tunnel appliances for
+# VPNGateway/VPNConnection; these bound their placement and per-tenant scale.
+# Every appliance exposes per-connection metrics on the named `vpn-metrics`
+# port. When the VictoriaMetrics Operator VMPodScrape CRD is installed, this
+# chart automatically registers all `app=cozyplane-vpn-gateway` pods for scrape.
+# Empty/zero values use the controller's built-in defaults.
+vpn:
+  # Place tunnel appliances on a dedicated gateway node-pool: comma-separated
+  # "key=value" node labels (nodeSelector). Empty runs them anywhere.
+  gatewayNodeSelector: ""
+  # Taint key the appliance tolerates (Exists/NoSchedule), to schedule onto a
+  # tainted gateway pool. Empty adds no toleration.
+  gatewayTolerationKey: ""
+  # Per-tenant caps (0 = built-in default): gateways per namespace, peers per
+  # gateway — bounds unbounded crypto workloads.
+  maxGatewaysPerNamespace: 0
+  maxConnectionsPerGateway: 0
+  # Opt in after the kubelet admits net.ipv4.ip_forward and
+  # net.ipv6.conf.all.forwarding as pod sysctls. Drops privileged mode and keeps
+  # only NET_ADMIN, NET_RAW and NET_BIND_SERVICE.
+  hardenedAppliance: false
+  # Prometheus-compatible VPN metrics are exposed by every tunnel appliance on
+  # its named vpn-metrics port. Resources below are rendered only when their
+  # respective operator CRDs are installed in the cluster.
+  observability:
+    podScrape:
+      # Keep appliance discovery on by default when VictoriaMetrics is present.
+      enabled: true
+      interval: 30s
+    rules:
+      enabled: true
+      # Idle tunnels are valid for many installations, so this alert is opt-in.
+      noTraffic:
+        enabled: false
+        window: 30m
+    dashboard:
+      enabled: true
+      # Empty matches every Grafana instance visible to the operator.
+      instanceSelector: {}
+
+# Observability (docs/observability.md). ALL OFF BY DEFAULT, matching
+# Cozystack's own posture (its Hubble ships disabled by default). Turn on only
+# what you want; each part is independent.
+observability:
+  # Per-flow events with verdicts and drop reasons: the flow_events ring buffer
+  # + flow_seen LRU in the datapath, the raw /flows loopback endpoint (read via
+  # cozyplane-flowctl), and the cozyplane_flow_* / cozyplane_flows_total series
+  # on each agent's :9411/metrics. Enabling adds ~14MiB of map memlock per node
+  # (visible in cozyplane_bpf_map_memlock_bytes).
+  flows: false
+  # DNS metrics from the split-horizon resolver: cozyplane_dns_{queries,
+  # responses}_total on the responder's :9413/metrics. Cheap (no datapath), but
+  # off by default so the node exposes no extra port unless asked.
+  dnsMetrics: false
 
 agent:
   priorityClassName: system-node-critical

@@ -173,3 +173,27 @@ func TestBindingDoesNotAdoptAForeignNAD(t *testing.T) {
 		t.Errorf("owner references = %+v, want the original owner untouched", owners)
 	}
 }
+
+func TestBindingPreservesUnownedNADContent(t *testing.T) {
+	s := nadScheme(t)
+	b := vpcBinding("consumer", "grant", "owner", "vpc", true)
+	b.UID = "binding-uid"
+	foreign := &unstructured.Unstructured{}
+	foreign.SetGroupVersionKind(nadGVK)
+	foreign.SetName("vpc")
+	foreign.SetNamespace("consumer")
+	foreign.SetLabels(map[string]string{"managed-by": "operator"})
+	if err := unstructured.SetNestedField(foreign.Object, "original-config", "spec", "config"); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(b, foreign).Build()
+	reconcileBinding(t, c, s, "consumer", "grant")
+	got := getNAD(t, c, "consumer", "vpc")
+	if got == nil {
+		t.Fatal("foreign NAD deleted")
+	}
+	config, _, _ := unstructured.NestedString(got.Object, "spec", "config")
+	if config != "original-config" || len(got.GetOwnerReferences()) != 0 || len(got.GetLabels()) != 1 || got.GetLabels()["managed-by"] != "operator" {
+		t.Fatalf("foreign NAD mutated: %v", got.Object)
+	}
+}

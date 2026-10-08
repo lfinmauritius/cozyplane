@@ -44,6 +44,9 @@ most likely to set:
 - `mtu` — pod MTU (underlay MTU minus ~50 bytes of Geneve overhead).
 - `cniConfName` — the CNI conflist filename; use a low prefix such as
   `00-cozyplane.conflist` to sort ahead of a co-installed CNI (e.g. Cilium).
+- `cniConfEnabled` controls whether the agent writes that standalone conflist
+  (default `true`). Set it to `false` when the platform supplies a chained
+  conflist, so exactly one component owns CNI configuration.
 - `genevePort` — override only to avoid a clash with another overlay on 6081.
 - `exportPolicy.enabled` — the VPCBinding export admission gate (needs k8s 1.30+).
 - `crds.enabled` — the CRD serving of the group (default true; disable only to
@@ -64,3 +67,8 @@ most likely to set:
 - RBAC for both components, the aggregated tenant roles (`cozyplane-tenant-edit` /
   `-view`, docs/multitenancy.md), and the export
   ValidatingAdmissionPolicy.
+
+Managed VPN appliances use privileged compatibility mode by default. On nodes
+whose kubelet admits the forwarding sysctls, set `vpn.hardenedAppliance=true` to
+drop privileged mode and retain only `NET_ADMIN`, `NET_RAW`, and
+`NET_BIND_SERVICE`.

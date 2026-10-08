@@ -48,7 +48,7 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 
-	"github.com/lllamnyp/cozyplane/datapath"
+	"github.com/lllamnyp/cozyplane/internal/vpnnet"
 )
 
 func main() {
@@ -73,13 +73,10 @@ func main() {
 }
 
 func run(vpcIface, fabricIface, clusterDNS string, internalCIDRs []string, log *slog.Logger) error {
-	// The CNI sets these up at gateway-attach; re-assert in case the netns was
-	// recycled (privileged container, own netns only).
-	if err := datapath.WriteProcSys("net/ipv4/ip_forward", "1"); err != nil {
-		return fmt.Errorf("enable ip_forward: %w", err)
-	}
-	if err := datapath.WriteProcSys("net/ipv6/conf/all/forwarding", "1"); err != nil {
-		return fmt.Errorf("enable ipv6 forwarding: %w", err)
+	// CNI already enables forwarding before the container starts. Read first
+	// so the capability-bounded container needs no writable /proc/sys mount.
+	if err := vpnnet.EnsureDualStackForwarding(); err != nil {
+		return err
 	}
 
 	// The same policy in both families, each table seeing only its own
@@ -228,9 +225,10 @@ func forwardRules(vpcIface string, internalCIDRs []string) [][]string {
 
 // runDNSProxy serves :53 (UDP and TCP) and forwards each query to upstream
 // over its own sockets, which the node's Service machinery translates
-// (socket-LB or kube-proxy alike). Fire-and-forget goroutines per query.
+// (socket-LB or kube-proxy alike). Work is bounded across both transports.
 func runDNSProxy(upstream string, log *slog.Logger) error {
 	const timeout = 5 * time.Second
+	slots := make(chan struct{}, 128)
 
 	uconn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 53})
 	if err != nil {
@@ -244,9 +242,15 @@ func runDNSProxy(upstream string, log *slog.Logger) error {
 				log.Error("dns udp read", "err", err)
 				return
 			}
+			select {
+			case slots <- struct{}{}:
+			default:
+				continue
+			}
 			query := make([]byte, n)
 			copy(query, buf[:n])
 			go func(query []byte, client *net.UDPAddr) {
+				defer func() { <-slots }()
 				up, err := net.DialTimeout("udp", upstream, timeout)
 				if err != nil {
 					return
@@ -268,6 +272,7 @@ func runDNSProxy(upstream string, log *slog.Logger) error {
 
 	tln, err := net.Listen("tcp", ":53")
 	if err != nil {
+		_ = uconn.Close()
 		return fmt.Errorf("listen tcp :53: %w", err)
 	}
 	go func() {
@@ -277,7 +282,14 @@ func runDNSProxy(upstream string, log *slog.Logger) error {
 				log.Error("dns tcp accept", "err", err)
 				return
 			}
+			select {
+			case slots <- struct{}{}:
+			default:
+				_ = conn.Close()
+				continue
+			}
 			go func(conn net.Conn) {
+				defer func() { <-slots }()
 				defer conn.Close()
 				up, err := net.DialTimeout("tcp", upstream, timeout)
 				if err != nil {

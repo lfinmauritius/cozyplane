@@ -48,6 +48,10 @@ func TestServiceVIPValidate(t *testing.T) {
 		{"no claim shape", mkVIP("web", "10.0.0.254"), false},
 		{"VNI zero", mkVIP("sv0.10-0-0-254", "10.0.0.254"), false},
 		{"not an IP", mkVIP("sv5.bogus", "bogus"), false},
+		{"reserved bridge", mkVIP(sdn.ServiceVIPName(100, "169.254.1.1"), "169.254.1.1"), false},
+		{"reserved hairpin", mkVIP(sdn.ServiceVIPName(100, "169.254.42.1"), "169.254.42.1"), false},
+		{"reserved v6 hairpin", mkVIP(sdn.ServiceVIPName(100, "fe80::2a:1"), "fe80::2a:1"), false},
+		{"reserved RFC6052", mkVIP(sdn.ServiceVIPName(100, "64:ff9b::a9fe:2a01"), "64:ff9b::a9fe:2a01"), false},
 	}
 	for _, c := range cases {
 		errs := s.Validate(context.Background(), c.vip)

@@ -17,8 +17,10 @@ limitations under the License.
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -38,9 +40,13 @@ import (
 // (names that stay distinct across concurrent sandboxes) for a hypothetical one.
 const maxAttachments = 10
 
-// maxDelegates bounds Multus-delegated NICs by that same one character, which for
-// them holds a letter: net0..net25. KubeVirt numbers a VM's secondary NICs from
-// net1 in spec.networks order, so this is 25 secondary NICs on one VM.
+const (
+	maxNetworksAnnotationBytes = 16 * 1024
+	maxVPCReferenceBytes       = 63 + 1 + 253
+)
+
+// maxDelegates bounds legacy netN Multus interface names by the one character
+// available in their backwards-compatible host-veth name: net0..net25.
 const maxDelegates = 25
 
 // hostVethPrefix is the host-side veth prefix. It must stay in step with
@@ -104,6 +110,46 @@ type netEntry struct {
 	Name string `json:"name,omitempty"`
 }
 
+func parseNetworkEntries(text string) ([]netEntry, error) {
+	if len(text) > maxNetworksAnnotationBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", networksAnnotation, maxNetworksAnnotationBytes)
+	}
+	decoder := json.NewDecoder(strings.NewReader(text))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('[') {
+		return nil, fmt.Errorf("%s must be a JSON list of network entries", networksAnnotation)
+	}
+	var entries []netEntry
+	seen := map[string]bool{}
+	for decoder.More() {
+		if len(entries) >= maxAttachments {
+			return nil, fmt.Errorf("%s exceeds the %d-entry limit", networksAnnotation, maxAttachments)
+		}
+		var entry netEntry
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, fmt.Errorf("%s has an invalid JSON entry at index %d", networksAnnotation, len(entries))
+		}
+		if len(entry.VPC) > maxVPCReferenceBytes || len(entry.IP) > 45 || len(entry.MAC) > 23 || len(entry.Name) > 15 {
+			return nil, fmt.Errorf("%s entry %d exceeds a field length limit", networksAnnotation, len(entries))
+		}
+		if entry.Name != "" {
+			if seen[entry.Name] {
+				return nil, fmt.Errorf("%s repeats an interface name at index %d", networksAnnotation, len(entries))
+			}
+			seen[entry.Name] = true
+		}
+		entries = append(entries, entry)
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim(']') {
+		return nil, fmt.Errorf("%s has an incomplete JSON list", networksAnnotation)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, fmt.Errorf("%s contains trailing JSON data", networksAnnotation)
+	}
+	return entries, nil
+}
+
 // parseAttachments turns the pod's annotations into the ordered attachment list.
 // It returns nil (no error) when the pod requests no VPC at all — the
 // default-network case.
@@ -119,6 +165,9 @@ func parseAttachments(vpcAnno, networksAnno, podNS string) ([]attachment, error)
 	}
 
 	if vpcAnno != "" {
+		if len(vpcAnno) > maxVPCReferenceBytes {
+			return nil, fmt.Errorf("%s exceeds the VPC reference length limit", vpcAnnotation)
+		}
 		ns, name := parseVPCRef(vpcAnno, podNS)
 		return []attachment{{Index: 0, VPCNamespace: ns, VPCName: name, IfName: contVethName}}, nil
 	}
@@ -126,16 +175,12 @@ func parseAttachments(vpcAnno, networksAnno, podNS string) ([]attachment, error)
 		return nil, nil
 	}
 
-	var entries []netEntry
-	if err := json.Unmarshal([]byte(networksAnno), &entries); err != nil {
-		return nil, fmt.Errorf("%s is not a JSON list of network entries: %w", networksAnnotation, err)
+	entries, err := parseNetworkEntries(networksAnno)
+	if err != nil {
+		return nil, err
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("%s is an empty list: omit it to stay on the default network", networksAnnotation)
-	}
-	if len(entries) > maxAttachments {
-		return nil, fmt.Errorf("%s asks for %d attachments; the limit is %d (host interface names)",
-			networksAnnotation, len(entries), maxAttachments)
 	}
 
 	out := make([]attachment, 0, len(entries))
@@ -201,27 +246,39 @@ func parseAttachments(vpcAnno, networksAnno, podNS string) ([]attachment, error)
 }
 
 // isDelegatedIfName reports whether an interface name belongs to Multus rather
-// than to the annotation path. net[0-9]+ is what Multus assigns and what KubeVirt
-// requests, in spec.networks order, for a VM's secondary NICs; the name space is
-// reserved so the two paths cannot claim the same interface
-// (docs/kubevirt-multi-nic.md).
+// than to the annotation path. Multus traditionally assigns netN. Recent
+// KubeVirt releases request pod plus an eleven-character lowercase hex digest
+// for secondary launcher-pod interfaces. Both spaces are reserved so the two
+// attachment paths cannot claim the same interface.
 func isDelegatedIfName(name string) bool {
-	if !strings.HasPrefix(name, "net") || len(name) == len("net") {
+	if strings.HasPrefix(name, "net") && len(name) > len("net") {
+		for _, c := range name[len("net"):] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	if !strings.HasPrefix(name, "pod") || len(name) != len("pod")+11 {
 		return false
 	}
-	for _, c := range name[len("net"):] {
-		if c < '0' || c > '9' {
+	for _, c := range name[len("pod"):] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
 			return false
 		}
 	}
 	return true
 }
 
-// delegateIndex extracts N from netN.
+// delegateIndex extracts N from netN. KubeVirt's digest-shaped name has no
+// ordinal; Index is not used for delegated datapath identity, so zero is the
+// canonical value for that form.
 func delegateIndex(ifName string) (int, error) {
-	if !isDelegatedIfName(ifName) {
-		return 0, fmt.Errorf("delegated interface name %q is not net<N>: cozyplane's delegate mode "+
-			"needs the naming Multus and KubeVirt assign by default", ifName)
+	if strings.HasPrefix(ifName, "pod") && isDelegatedIfName(ifName) {
+		return 0, nil
+	}
+	if !strings.HasPrefix(ifName, "net") || !isDelegatedIfName(ifName) {
+		return 0, fmt.Errorf("delegated interface name %q is neither net<N> nor KubeVirt's pod<digest> form", ifName)
 	}
 	n, err := strconv.Atoi(ifName[len("net"):])
 	if err != nil {
@@ -242,6 +299,9 @@ func delegateAttachment(confVPC, ifName, networksAnno, podNS string) (attachment
 	if confVPC == "" {
 		return attachment{}, fmt.Errorf("delegate mode needs a vpc in the plugin config")
 	}
+	if len(confVPC) > maxVPCReferenceBytes {
+		return attachment{}, fmt.Errorf("delegate VPC reference exceeds the length limit")
+	}
 	idx, err := delegateIndex(ifName)
 	if err != nil {
 		return attachment{}, err
@@ -252,9 +312,9 @@ func delegateAttachment(confVPC, ifName, networksAnno, podNS string) (attachment
 	if networksAnno == "" {
 		return a, nil
 	}
-	var entries []netEntry
-	if err := json.Unmarshal([]byte(networksAnno), &entries); err != nil {
-		return attachment{}, fmt.Errorf("%s is not a JSON list of network entries: %w", networksAnnotation, err)
+	entries, err := parseNetworkEntries(networksAnno)
+	if err != nil {
+		return attachment{}, err
 	}
 	for i, e := range entries {
 		if e.Name != ifName {
@@ -317,6 +377,14 @@ func defaultIfName(index int) string {
 // Same 14 characters as the indexed form and the same "cph" prefix, so datapath's
 // rebuild scan and the masquerade RETURN rule keep matching.
 func hostVethNameForDelegate(containerID, ifName string) (string, error) {
+	if strings.HasPrefix(ifName, "pod") && isDelegatedIfName(ifName) {
+		// KubeVirt names do not carry a NIC ordinal. Hash the complete sandbox and
+		// interface identities so two NICs in one launcher pod stay distinct and
+		// DEL reconstructs the exact same name. Six bytes plus the three-byte
+		// prefix fit Linux IFNAMSIZ exactly.
+		sum := sha256.Sum256([]byte(containerID + "\x00" + ifName))
+		return fmt.Sprintf("%s%x", hostVethPrefix, sum[:6]), nil
+	}
 	n, err := delegateIndex(ifName)
 	if err != nil {
 		return "", err

@@ -19,10 +19,14 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
+	"net"
 	"os"
+	"strings"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -60,12 +64,17 @@ func main() {
 		gatewayNamespace     string
 		internalCIDRs        string
 		clusterDNS           string
+		vpnNodeSelector      string
+		vpnTolerationKey     string
+		vpnMaxGateways       int
+		vpnMaxConnections    int
+		vpnHardened          bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
@@ -80,12 +89,26 @@ func main() {
 		"comma-separated cluster-internal CIDRs gateways must not forward tenant traffic to (pod, service, node networks)")
 	flag.StringVar(&clusterDNS, "cluster-dns", "",
 		"cluster DNS ClusterIP gateways allow on :53")
+	flag.StringVar(&vpnNodeSelector, "vpn-gateway-node-selector", "",
+		"comma-separated key=value node labels placing managed VPN appliances on a dedicated gateway pool (issue #6, docs/vpn.md §3.5); empty runs them anywhere")
+	flag.StringVar(&vpnTolerationKey, "vpn-gateway-toleration-key", "",
+		"taint key the managed VPN appliance tolerates (Exists/NoSchedule), so it can schedule onto a tainted gateway pool; empty adds no toleration")
+	flag.IntVar(&vpnMaxGateways, "vpn-max-gateways-per-namespace", 0,
+		"per-tenant cap on managed VPN gateways (0 uses the built-in default)")
+	flag.IntVar(&vpnMaxConnections, "vpn-max-connections-per-gateway", 0,
+		"per-gateway cap on VPN connections/peers (0 uses the built-in default)")
+	flag.BoolVar(&vpnHardened, "vpn-hardened-appliance", false,
+		"use pod forwarding sysctls and only NET_ADMIN/NET_RAW/NET_BIND_SERVICE instead of privileged VPN appliances")
 
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if !enableLeaderElection {
+		setupLog.Error(fmt.Errorf("leader election is required for unique tenant network and group allocation"), "unsafe controller configuration")
+		os.Exit(1)
+	}
 
 	var tlsOpts []func(*tls.Config)
 	if !enableHTTP2 {
@@ -106,11 +129,12 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "sdn-controller.cozystack.io",
+		Scheme:                  scheme,
+		Metrics:                 metricsServerOptions,
+		HealthProbeBindAddress:  probeAddr,
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        controllerLeaderElectionID,
+		LeaderElectionNamespace: controllerLeaderElectionNamespace,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -130,6 +154,7 @@ func main() {
 
 	if err := (&sdncontroller.VPCBindingReconciler{
 		Client: mgr.GetClient(),
+		Reader: mgr.GetAPIReader(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VPCBinding")
@@ -166,6 +191,7 @@ func main() {
 	if err := (&sdncontroller.PersistentPortReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Reader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PersistentPort")
 		os.Exit(1)
@@ -196,8 +222,9 @@ func main() {
 	}
 
 	if err := (&sdncontroller.VPCGatewayReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		InternalCIDRs: parseCIDRs(internalCIDRs),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VPCGateway")
 		os.Exit(1)
@@ -221,6 +248,39 @@ func main() {
 			setupLog.Error(err, "unable to create controller", "controller", "Gateway")
 			os.Exit(1)
 		}
+
+		// Managed VPN tunnels (issue #6): the same cozyplane image ships the
+		// vpn-gateway binary, so it is gated on the same --gateway-image.
+		var vpnTolerations []corev1.Toleration
+		if vpnTolerationKey != "" {
+			vpnTolerations = []corev1.Toleration{{
+				Key:      vpnTolerationKey,
+				Operator: corev1.TolerationOpExists,
+				Effect:   corev1.TaintEffectNoSchedule,
+			}}
+		}
+		if err := (&sdncontroller.VPNGatewayReconciler{
+			Client: mgr.GetClient(),
+			// Live reads for the tunnel quota — a stale cache would let a burst of
+			// concurrent creates each slip under the cap.
+			Reader: mgr.GetAPIReader(),
+			Scheme: mgr.GetScheme(),
+			Config: sdncontroller.VPNGatewayConfig{
+				Image:                    gatewayImage,
+				DefaultListenPort:        51820,
+				NodeSelector:             parseNodeSelector(vpnNodeSelector),
+				Tolerations:              vpnTolerations,
+				MaxGatewaysPerNamespace:  vpnMaxGateways,
+				MaxConnectionsPerGateway: vpnMaxConnections,
+				HardenedAppliance:        vpnHardened,
+				// The route-CIDR deny-set reuses the same cluster-internal networks
+				// the gateway pods are told never to forward to.
+				InternalCIDRs: parseCIDRs(internalCIDRs),
+			},
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "VPNGateway")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -240,6 +300,7 @@ func main() {
 	// cluster with no aggregated apiserver at all.
 	if err := (&localsdnctrl.FabricIPReconciler{
 		Client: mgr.GetClient(),
+		Reader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "FabricIP")
 		os.Exit(1)
@@ -250,3 +311,42 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// parseNodeSelector turns a "k=v,k2=v2" flag into a label map. Malformed entries
+// are skipped rather than fatal — a placement hint should never wedge startup.
+func parseNodeSelector(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(kv) == 2 && kv[0] != "" {
+			out[kv[0]] = kv[1]
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseCIDRs turns a comma-separated CIDR list into parsed networks, skipping
+// malformed entries (a placement/deny-set hint must never wedge startup).
+func parseCIDRs(s string) []*net.IPNet {
+	if s == "" {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, c := range strings.Split(s, ",") {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+const (
+	controllerLeaderElectionID        = "sdn-controller.cozystack.io"
+	controllerLeaderElectionNamespace = "kube-system"
+)

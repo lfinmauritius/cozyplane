@@ -69,23 +69,23 @@ func EnsureAPIService(ctx context.Context, cfg *rest.Config, svcNamespace, svcNa
 	if err != nil {
 		return fmt.Errorf("dynamic client: %w", err)
 	}
+	return ensureAPIService(ctx, dyn, svcNamespace, svcName, caInjection, insecureSkipTLS)
+}
+
+func ensureAPIService(ctx context.Context, dyn dynamic.Interface, svcNamespace, svcName, caInjection string, insecureSkipTLS bool) error {
 	c := dyn.Resource(apiServiceGVR)
 
 	spec := map[string]any{
-		"group":                sdnGroup,
-		"version":              sdnVersion,
-		"groupPriorityMinimum": int64(1000),
-		"versionPriority":      int64(15),
+		"group":                 sdnGroup,
+		"version":               sdnVersion,
+		"groupPriorityMinimum":  int64(1000),
+		"versionPriority":       int64(15),
+		"insecureSkipTLSVerify": insecureSkipTLS,
 		"service": map[string]any{
 			"namespace": svcNamespace,
 			"name":      svcName,
 			"port":      int64(443),
 		},
-	}
-	if insecureSkipTLS {
-		// The server self-signed its serving cert (dev/CI: no cert-manager), so
-		// the aggregator has no CA to pin. Production installs inject one.
-		spec["insecureSkipTLSVerify"] = true
 	}
 	annotations := map[string]any{}
 	if caInjection != "" {

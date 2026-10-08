@@ -23,6 +23,9 @@ import (
 	"net"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
+	sdnv1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
+	"github.com/lllamnyp/cozyplane/internal/ipam"
+	"github.com/lllamnyp/cozyplane/pkg/registry/sdn/claim"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -93,12 +96,34 @@ func (portStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Objec
 func (portStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	port := obj.(*sdn.Port)
 	var errs field.ErrorList
+	if claim.IsPersistent(port) {
+		for _, entry := range []struct {
+			path  *field.Path
+			value string
+		}{
+			{field.NewPath("spec", "podNamespace"), port.Spec.PodNamespace},
+			{field.NewPath("spec", "vpcRef", "namespace"), port.Spec.VPCRef.Namespace},
+			{field.NewPath("spec", "vpcRef", "name"), port.Spec.VPCRef.Name},
+			{field.NewPath("metadata", "labels").Key(sdnv1.LabelVMNIC), port.Labels[sdnv1.LabelVMNIC]},
+		} {
+			if entry.value == "" {
+				errs = append(errs, field.Required(entry.path, "persistent NIC identity must be complete"))
+			}
+		}
+		mac, err := net.ParseMAC(port.Spec.MAC)
+		if err != nil || len(mac) != 6 || mac[0]&1 != 0 {
+			errs = append(errs, field.Invalid(field.NewPath("spec", "mac"), "", "persistent NIC requires a six-byte unicast MAC"))
+		}
+	}
 
 	ip := net.ParseIP(port.Spec.IP)
 	if ip == nil || ip.String() != port.Spec.IP {
 		errs = append(errs, field.Invalid(field.NewPath("spec", "ip"), port.Spec.IP,
 			"must be an IP address in canonical form"))
 		return errs
+	}
+	if ipam.IsReserved(ip) {
+		errs = append(errs, field.Invalid(field.NewPath("spec", "ip"), port.Spec.IP, "reserved platform bridge or hairpin address"))
 	}
 	vni, _, ok := sdn.ParseClaim(sdn.ClaimPrefixPort, port.Name)
 	if !ok {
@@ -130,8 +155,8 @@ func (portStrategy) Canonicalize(obj runtime.Object) {
 
 // ValidateUpdate keeps the claimed address immutable: the (immutable) name is
 // the claim on {VNI, spec.ip}, so neither the address nor the VPC it is
-// scoped to may drift after create. Everything else (node re-point at
-// migration cutover, labels) updates freely.
+// scoped to may drift after create. Persistent NIC identity and MAC are pinned;
+// node and launcher binding updates remain allowed during migration.
 func (portStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	newPort := obj.(*sdn.Port)
 	oldPort := old.(*sdn.Port)
@@ -144,7 +169,7 @@ func (portStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object)
 		errs = append(errs, field.Forbidden(field.NewPath("spec", "vpcRef"),
 			"immutable: the claim is scoped to the VPC's VNI"))
 	}
-	return errs
+	return append(errs, validatePersistentUpdate(newPort, oldPort)...)
 }
 
 // WarningsOnUpdate returns warnings for the given update.
@@ -170,7 +195,25 @@ func (portStatusStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime
 }
 
 func (portStatusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	return validatePersistentUpdate(obj.(*sdn.Port), old.(*sdn.Port))
+}
+
+func validatePersistentUpdate(next, old *sdn.Port) field.ErrorList {
+	var errs field.ErrorList
+	for _, key := range []string{sdnv1.LabelVMName, sdnv1.LabelVMNIC} {
+		if next.Labels[key] != old.Labels[key] {
+			errs = append(errs, field.Forbidden(field.NewPath("metadata", "labels").Key(key), "immutable persistent NIC identity"))
+		}
+	}
+	if claim.IsPersistent(old) {
+		if next.Spec.PodNamespace != old.Spec.PodNamespace {
+			errs = append(errs, field.Forbidden(field.NewPath("spec", "podNamespace"), "immutable persistent NIC namespace"))
+		}
+		if next.Spec.MAC != old.Spec.MAC {
+			errs = append(errs, field.Forbidden(field.NewPath("spec", "mac"), "immutable pinned MAC"))
+		}
+	}
+	return errs
 }
 
 func (portStatusStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {

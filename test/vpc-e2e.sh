@@ -530,6 +530,80 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+phase "flow observability: verdicts with reasons on /flows (docs/observability.md)"
+# The agents serve /flows only when launched with --flows; probe first and skip
+# rather than fail a cluster that has the feature off (the chart default).
+AGENTS=$($K -n kube-system get pods -l app=cozyplane-agent -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+# The raw flow endpoints are loopback-only (docs/observability.md §4); reach them
+# by exec-ing wget inside the agent, the operator path cozyplane-flowctl uses.
+flowget() { $K -n kube-system exec "$1" -c agent -- wget -q -O- "http://127.0.0.1:9412/flows?limit=4096" 2>/dev/null; }
+flowprobe() {
+  for ap in $AGENTS; do
+    $K -n kube-system exec "$ap" -c agent -- wget -q -O- "http://127.0.0.1:9412/flows?limit=1" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+# flowsHave polls every agent's /flows for a line matching ALL given fragments.
+flowsHave() {
+  for _ in $(seq 1 12); do
+    for ap in $AGENTS; do
+      out=$(flowget "$ap") || continue
+      hit=1
+      for frag in "$@"; do echo "$out" | grep -qF "$frag" || { hit=0; break; }; done
+      [ "$hit" = "1" ] && return 0
+    done
+    sleep 2
+  done
+  return 1
+}
+if ! flowprobe; then
+  skip "flow observability (agents run without --flows)"
+else
+  # An admitted east-west flow shows up enriched with its VPC and pods.
+  served a1 "http://$A2:8080/" >/dev/null 2>&1
+  flowsHave '"verdict":"allow"' '"reason":"allow"' "\"pod\":\"$NS/a2\"" "\"vpc\":\"$NS/va\"" \
+    && pass "an admitted east-west flow is visible, enriched with VPC and pod" \
+    || fail "no enriched allow event for a1->a2"
+
+  # A SecurityGroup deny names its gate: reason=sg_ingress, correct target.
+  # vb has a single pod, so bring a short-lived co-VPC client for the denied dial.
+  apply <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: bflow, namespace: $NS, annotations: {sdn.cozystack.io/vpc: vb}}
+spec:
+  containers: [{name: s, image: nicolaka/netshoot, command: [sleep, infinity]}]
+EOF
+  $K -n "$NS" wait --for=condition=Ready pod/bflow --timeout=120s >/dev/null 2>&1
+  $K -n "$NS" label pod b1 role=flowlocked --overwrite >/dev/null
+  apply <<EOF
+apiVersion: sdn.cozystack.io/v1alpha1
+kind: SecurityGroup
+metadata: {name: flowlock, namespace: $NS}
+spec:
+  vpcRef: {name: vb}
+  podSelector: {matchLabels: {role: flowlocked}}
+  ingress: [{from: {cidr: "192.0.2.0/24"}, ports: [{protocol: TCP, port: 8080}]}]
+EOF
+  sleep 6
+  refused bflow "http://$B1:8080/" >/dev/null 2>&1 || true
+  flowsHave '"verdict":"deny"' '"reason":"sg_ingress"' "\"pod\":\"$NS/b1\"" \
+    && pass "a SecurityGroup deny is visible with reason=sg_ingress and the right target" \
+    || fail "no sg_ingress deny event for the locked pod"
+  $K -n "$NS" delete securitygroup flowlock >/dev/null 2>&1
+  $K -n "$NS" label pod b1 role- >/dev/null 2>&1
+  $K -n "$NS" delete pod bflow --wait=false >/dev/null 2>&1
+
+  # The flow-derived Prometheus series ride the same /metrics as everything.
+  FM=0
+  for ap in $AGENTS; do
+    n=$($K get --raw "/api/v1/namespaces/kube-system/pods/${ap}:9411/proxy/metrics" 2>/dev/null | grep -c '^cozyplane_flows_total') && [ "${n:-0}" -gt 0 ] && FM=1 && break
+  done
+  [ "$FM" = "1" ] && pass "cozyplane_flows_total is served on /metrics" \
+    || fail "cozyplane_flows_total missing from /metrics"
+fi
+
+# ---------------------------------------------------------------------------
 phase "revocation: severing a live pod's VPC access"
 $K -n "$NS" delete vpcbinding va >/dev/null 2>&1
 sleep 10

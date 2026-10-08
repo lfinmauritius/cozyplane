@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // VPCRef references a VPC by namespace and name. The namespace is the VPC
@@ -74,10 +75,12 @@ type PortSpec struct {
 	// Forwarding marks a port allowed to emit packets sourced from an address
 	// that is not its own — a tenant router or firewall bridging two VPCs
 	// (docs/multi-attach.md). The CNI sets it from the VPCBinding's
-	// spec.allowForwarding; the datapath honours it as PORT_F_GATEWAY, which
-	// lifts from_pod's source RPF check and marks what the port delivers as
-	// gateway-forwarded so the destination's isolation check admits an off-VPC
-	// source.
+	// spec.allowForwarding; the datapath honours it as PORT_F_FORWARD, which
+	// lifts from_pod's source RPF check and marks the packet FWD_MARK so the
+	// destination's isolation check admits an off-VPC source — but, unlike a
+	// gateway, that source is then re-judged by the destination's
+	// SecurityGroups as a north-south source (a from:{cidr} rule). Deliberately
+	// NOT PORT_F_GATEWAY, which would skip east-west policy entirely.
 	//
 	// DISTINCT from Gateway, and it must stay that way. Gateway means "this is
 	// the VPC's .1 egress leg" and is what desiredGateways reads to program
@@ -89,13 +92,30 @@ type PortSpec struct {
 
 // PortStatus is the controller-observed state of a Port.
 type PortStatus struct {
-	// Groups is the set of SecurityGroup numeric ids (1..63, within the Port's
+	// Groups is the set of SecurityGroup numeric ids (1..62, within the Port's
 	// VPC) this Port is a member of, resolved by the controller from the pod's
 	// labels. The agent folds it into the datapath membership bitmap. Empty
 	// means "no groups" — legacy allow-all intra-VPC ingress.
+	// Zero denotes a selected group awaiting allocation: default-deny without
+	// granting rules. Resolved groups still union their permissions normally.
 	// +optional
 	// +listType=atomic
 	Groups []int32 `json:"groups,omitempty"`
+
+	// GroupRefs proves the current SecurityGroup UID behind each allocated ID.
+	// +optional
+	// +listType=atomic
+	GroupRefs []SecurityGroupMembership `json:"groupRefs,omitempty"`
+	// GroupPodUID identifies the pod whose labels resolved this membership.
+	// +optional
+	GroupPodUID types.UID `json:"groupPodUID,omitempty"`
+}
+
+// SecurityGroupMembership prevents a recycled numeric ID from granting the
+// permissions of a replacement group to predecessor Ports.
+type SecurityGroupMembership struct {
+	ID  int32     `json:"id"`
+	UID types.UID `json:"uid"`
 }
 
 // +genclient

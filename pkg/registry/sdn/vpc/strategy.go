@@ -19,8 +19,10 @@ package vpc
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
+	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -84,6 +86,9 @@ func (vpcStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object
 }
 
 func (vpcStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
+	if err := sdnv1alpha1.ValidateVPCCIDRs(obj.(*sdn.VPC).Spec.CIDRs); err != nil {
+		return field.ErrorList{field.Invalid(field.NewPath("spec", "cidrs"), "", err.Error())}
+	}
 	return field.ErrorList{}
 }
 
@@ -103,8 +108,11 @@ func (vpcStrategy) AllowUnconditionalUpdate() bool {
 func (vpcStrategy) Canonicalize(obj runtime.Object) {
 }
 
-func (vpcStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+func (s vpcStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
+	if slices.Equal(obj.(*sdn.VPC).Spec.CIDRs, old.(*sdn.VPC).Spec.CIDRs) {
+		return nil // unchanged legacy input must not trap cleanup/unrelated updates
+	}
+	return s.Validate(ctx, obj)
 }
 
 // WarningsOnUpdate returns warnings for the given update.

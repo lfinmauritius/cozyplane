@@ -14,6 +14,10 @@ metadata:
   labels:
     {{- include "cozyplane.labels" . | nindent 4 }}
 rules:
+  # The CNI verifies persistent launcher ownership against the current VMI UID.
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachineinstances"]
+    verbs: ["get"]
   # The agent learns remote pod CIDRs + addresses from Node objects, and patches
   # its own Node to advertise the address host traffic sources from (node_remotes).
   - apiGroups: [""]
@@ -53,6 +57,12 @@ rules:
   # The CNI plugin (same SA) also reads them to give a gateway pod its VPC leg.
   - apiGroups: ["sdn.cozystack.io"]
     resources: ["vpcgateways"]
+    verbs: ["get", "list", "watch"]
+  # VPNGateways: the agent reads status.routes and merges the connection-derived
+  # remote CIDRs into the same vpc_routes table it builds from VPCGateway routes
+  # (issue #6, docs/vpn.md §3.2).
+  - apiGroups: ["sdn.cozystack.io"]
+    resources: ["vpngateways"]
     verbs: ["get", "list", "watch"]
   # VPCPeering halves: the agent programs the peers map from mutually-matched
   # specs (not status), so it only needs to observe them.
@@ -162,6 +172,7 @@ spec:
             - "--mtu={{ .Values.mtu }}"
             - "--geneve-port={{ .Values.genevePort }}"
             - "--cni-conf-name={{ .Values.cniConfName }}"
+            - "--write-cni-conf={{ .Values.cniConfEnabled }}"
             {{- if .Values.egress.clusterCIDR }}
             # Cluster-egress masquerade: pod traffic leaving the cluster is
             # SNATed to the node address, giving pods an off-cluster return path.
@@ -173,6 +184,10 @@ spec:
             # Cluster-internal CIDRs a floating pod's public-IP egress skips
             # (routed to the gateway instead, which proxies DNS / denies the rest).
             - "--internal-cidrs={{ join "," $internal }}"
+            {{- end }}
+            {{- if .Values.observability.flows }}
+            # Flow observability (docs/observability.md): flow events + /flows.
+            - "--flows=true"
             {{- end }}
           ports:
             # Per-VPC traffic metrics (#2), Prometheus text at /metrics.
@@ -220,11 +235,23 @@ spec:
           image: {{ .Values.image }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           command: ["/usr/local/bin/cozyplane-responder"]
+          {{- if .Values.observability.dnsMetrics }}
+          ports:
+            # DNS observability (docs/observability.md §D): Prometheus text at
+            # /metrics — bounded, address-free aggregates (qtype/rcode by VPC).
+            - name: dns-metrics
+              containerPort: 9413
+              hostPort: 9413
+          {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if .Values.observability.dnsMetrics }}
+            - name: COZYPLANE_DNS_METRICS
+              value: "1"
+            {{- end }}
             {{- if .Values.kubeApiServer.host }}
             - name: KUBERNETES_SERVICE_HOST
               value: {{ .Values.kubeApiServer.host | quote }}

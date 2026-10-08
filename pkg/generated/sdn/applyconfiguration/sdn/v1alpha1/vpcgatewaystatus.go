@@ -44,6 +44,11 @@ type VPCGatewayStatusApplyConfiguration struct {
 	// see WHICH leg of a multi-attached appliance was chosen. Empty when no
 	// appliance is declared or none could be resolved.
 	AppliancePort *string `json:"appliancePort,omitempty"`
+	// Routes reports how each spec.routes entry resolved: the CIDRs it matched
+	// and the cluster-scoped Port name they were programmed toward, so an
+	// operator sees which leg a route landed on (and, when empty, that it did
+	// not resolve — the RoutesResolved condition carries why).
+	Routes []VPCGatewayRouteStatusApplyConfiguration `json:"routes,omitempty"`
 	// Phase is the lifecycle phase.
 	Phase *sdnv1alpha1.VPCGatewayPhase `json:"phase,omitempty"`
 	// Conditions is the detailed state.
@@ -77,6 +82,19 @@ func (b *VPCGatewayStatusApplyConfiguration) WithNATAddress6(value string) *VPCG
 // If called multiple times, the AppliancePort field is set to the value of the last call.
 func (b *VPCGatewayStatusApplyConfiguration) WithAppliancePort(value string) *VPCGatewayStatusApplyConfiguration {
 	b.AppliancePort = &value
+	return b
+}
+
+// WithRoutes adds the given value to the Routes field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Routes field.
+func (b *VPCGatewayStatusApplyConfiguration) WithRoutes(values ...*VPCGatewayRouteStatusApplyConfiguration) *VPCGatewayStatusApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithRoutes")
+		}
+		b.Routes = append(b.Routes, *values[i])
+	}
 	return b
 }
 

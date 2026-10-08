@@ -21,15 +21,19 @@ import (
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	sdnv1alpha1 "github.com/lllamnyp/cozyplane/api/sdn/v1alpha1"
+	"github.com/lllamnyp/cozyplane/internal/ipam"
+	"github.com/lllamnyp/cozyplane/internal/vpnlimits"
 )
 
 // vpcBindingFinalizer holds the binding until its authorized Ports are reaped,
@@ -43,6 +47,7 @@ const vpcBindingFinalizer = "sdn.cozystack.io/reap-ports"
 // on the pod's own node, the live local datapath — see datapath.SeverLocal).
 type VPCBindingReconciler struct {
 	client.Client
+	Reader client.Reader
 
 	Scheme *runtime.Scheme
 
@@ -51,6 +56,13 @@ type VPCBindingReconciler struct {
 	// VM can name the VPC at all — spec.networks admits only `pod` and `multus`
 	// (docs/kubevirt-multi-nic.md). Without Multus there is nothing to emit.
 	emitNAD bool
+}
+
+func (r *VPCBindingReconciler) reader() client.Reader {
+	if r.Reader != nil {
+		return r.Reader
+	}
+	return r.Client
 }
 
 // nadGVK is Multus's NetworkAttachmentDefinition, handled as unstructured to
@@ -128,6 +140,9 @@ func (r *VPCBindingReconciler) reconcileNAD(ctx context.Context, binding *sdnv1a
 		return nil
 	}
 	ref := binding.Spec.VPCRef
+	if !vpnlimits.ObjectName(ref.Name) || (ref.Namespace != "" && !vpnlimits.NamespaceName(ref.Namespace)) {
+		return fmt.Errorf("binding VPC reference is invalid")
+	}
 
 	// Named after the VPC, not the binding: two bindings authorizing the same VPC
 	// in one namespace describe one network, and a VM references the network.
@@ -141,6 +156,11 @@ func (r *VPCBindingReconciler) reconcileNAD(ctx context.Context, binding *sdnv1a
 		ref.Name, ref.Namespace, ref.Name)
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, nad, func() error {
+		// Keep manually managed NADs and objects owned by another binding.
+		// A matching name is not permission to overwrite or adopt their config.
+		if nad.GetResourceVersion() != "" && (binding.UID == "" || !metav1.IsControlledBy(nad, binding)) {
+			return nil
+		}
 		if err := unstructured.SetNestedField(nad.Object, config, "spec", "config"); err != nil {
 			return err
 		}
@@ -151,13 +171,7 @@ func (r *VPCBindingReconciler) reconcileNAD(ctx context.Context, binding *sdnv1a
 		labels[sdnv1alpha1.LabelVPCNamespace] = ref.Namespace
 		labels[sdnv1alpha1.LabelVPC] = ref.Name
 		nad.SetLabels(labels)
-		// Only own it if nobody else does. An operator who wrote their own NAD
-		// under this name keeps it — adopting it would make revoking any binding
-		// delete an object cozyplane never created.
-		if len(nad.GetOwnerReferences()) == 0 {
-			return controllerutil.SetControllerReference(binding, nad, r.Scheme)
-		}
-		return nil
+		return controllerutil.SetControllerReference(binding, nad, r.Scheme)
 	})
 	if err != nil {
 		return fmt.Errorf("reconcile network-attachment-definition %s/%s: %w", binding.Namespace, ref.Name, err)
@@ -174,36 +188,59 @@ func (r *VPCBindingReconciler) reapPorts(ctx context.Context, binding *sdnv1alph
 
 	// If another, still-live binding in this namespace authorizes the same VPC,
 	// the pods stay; reaping waits until the last grant is gone.
-	var bindings sdnv1alpha1.VPCBindingList
-	if err := r.List(ctx, &bindings, client.InNamespace(consumerNS)); err != nil {
-		return 0, fmt.Errorf("list vpcbindings: %w", err)
-	}
-	for i := range bindings.Items {
-		other := &bindings.Items[i]
-		if other.Name == binding.Name || !other.DeletionTimestamp.IsZero() {
-			continue
+	granted := false
+	if err := ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.VPCBinding, string, error) {
+		var bindings sdnv1alpha1.VPCBindingList
+		err := r.reader().List(ctx, &bindings, client.InNamespace(consumerNS), client.Limit(limit), client.Continue(token))
+		return bindings.Items, bindings.Continue, err
+	}, func(other *sdnv1alpha1.VPCBinding) {
+		if (other.Name == binding.Name && other.UID == binding.UID) || !other.DeletionTimestamp.IsZero() {
+			return
 		}
 		if other.Spec.VPCRef == ref {
-			return 0, nil
+			granted = true
 		}
+	}); err != nil {
+		return 0, fmt.Errorf("list vpcbindings: %w", err)
+	}
+	if granted {
+		return 0, nil
 	}
 
-	var ports sdnv1alpha1.PortList
-	if err := r.List(ctx, &ports, client.MatchingLabels{
-		sdnv1alpha1.LabelVPCNamespace: ref.Namespace,
-		sdnv1alpha1.LabelVPC:          ref.Name,
-		sdnv1alpha1.LabelPodNamespace: consumerNS,
+	type claim struct {
+		name            string
+		uid             types.UID
+		resourceVersion string
+	}
+	var candidates []claim
+	if err := ipam.WalkClaims(ctx, func(limit int64, token string) ([]sdnv1alpha1.Port, string, error) {
+		var ports sdnv1alpha1.PortList
+		err := r.reader().List(ctx, &ports, client.MatchingLabels{
+			sdnv1alpha1.LabelVPCNamespace: ref.Namespace,
+			sdnv1alpha1.LabelVPC:          ref.Name,
+			sdnv1alpha1.LabelPodNamespace: consumerNS,
+		}, client.Limit(limit), client.Continue(token))
+		return ports.Items, ports.Continue, err
+	}, func(port *sdnv1alpha1.Port) {
+		candidates = append(candidates, claim{port.Name, port.UID, port.ResourceVersion})
 	}); err != nil {
 		return 0, fmt.Errorf("list ports: %w", err)
 	}
 
 	reaped := 0
-	for i := range ports.Items {
-		if err := r.Delete(ctx, &ports.Items[i]); err != nil {
+	for i := range candidates {
+		if err := ctx.Err(); err != nil {
+			return reaped, err
+		}
+		item := &candidates[i]
+		port := &sdnv1alpha1.Port{ObjectMeta: metav1.ObjectMeta{
+			Name: item.name, UID: item.uid, ResourceVersion: item.resourceVersion,
+		}}
+		if err := r.Delete(ctx, port, client.Preconditions{UID: &port.UID, ResourceVersion: &port.ResourceVersion}); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}
-			return reaped, fmt.Errorf("delete port %q: %w", ports.Items[i].Name, err)
+			return reaped, fmt.Errorf("delete port %q: %w", port.Name, err)
 		}
 		reaped++
 	}

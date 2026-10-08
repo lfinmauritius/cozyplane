@@ -36,10 +36,22 @@ import (
 // device, and the remotes map. It is used by the agent. The CNI plugin uses the
 // pinned program/maps directly (see attach.go) rather than this Manager.
 type Manager struct {
-	objs          overlayObjects
-	geneveIfindex int
-	uplinkIfindex int
-	uplinkMAC     net.HardwareAddr
+	counterMu        sync.Mutex
+	counterScopes    map[uint32]bool // nil until the first complete VPC snapshot
+	counterDirty     bool            // failed pruning must retry an unchanged snapshot
+	networkMu        sync.Mutex
+	hfMu             sync.Mutex // serialize host-firewall rule/mode transitions
+	npMu             sync.Mutex
+	sgMu             sync.Mutex
+	routeMu          sync.Mutex
+	routeScopeSeeded bool
+	routeScopeCells  map[uint32]overlayRouteScopeGuard
+	migrateMu        sync.Mutex
+	migrateOwners    map[overlayLocalKey]*migrateForwardOwner
+	objs             overlayObjects
+	geneveIfindex    int
+	uplinkIfindex    int
+	uplinkMAC        net.HardwareAddr
 	// The floating uplink, when floating addresses live on a different link
 	// than the default route (EnsureFloatingUplink); zero = same as uplink.
 	// floatMu serializes EnsureFloatingUplink: it is called from several
@@ -72,6 +84,9 @@ func (m *Manager) Load(vni uint32) error {
 	if err := os.MkdirAll(PinRoot, 0o755); err != nil {
 		return fmt.Errorf("mkdir pin root: %w", err)
 	}
+	if err := ensureHFModePin(PinRoot); err != nil {
+		return err
+	}
 
 	// A pinned map the new object cannot reuse (map-ABI change) would fail the
 	// load below; remove such pins so they are created fresh (issue #7). The
@@ -81,6 +96,10 @@ func (m *Manager) Load(vni uint32) error {
 		return fmt.Errorf("reconcile pinned maps: %w", err)
 	}
 	m.recreatedPins = recreated
+	missing, err := missingPolicyPins()
+	if err != nil {
+		return err
+	}
 
 	opts := &ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: PinRoot}}
 	if err := loadOverlayObjects(&m.objs, opts); err != nil {
@@ -90,16 +109,19 @@ func (m *Manager) Load(vni uint32) error {
 		}
 		return fmt.Errorf("load bpf objects: %w", err)
 	}
-
-	progPath := filepath.Join(PinRoot, progPinName)
-	_ = os.Remove(progPath)
-	if err := m.objs.CozyplaneFromPod.Pin(progPath); err != nil {
-		return fmt.Errorf("pin from_pod program: %w", err)
+	m.routeScopeSeeded = false
+	m.routeScopeCells = nil
+	if err := m.BlockRoutes(); err != nil {
+		return fmt.Errorf("arm route bootstrap: %w", err)
 	}
-	toPodPath := filepath.Join(PinRoot, toPodPinName)
-	_ = os.Remove(toPodPath)
-	if err := m.objs.CozyplaneToPod.Pin(toPodPath); err != nil {
-		return fmt.Errorf("pin to_pod program: %w", err)
+	if err := m.clearMigrateForwards(); err != nil {
+		return fmt.Errorf("clear expired migration forwards: %w", err)
+	}
+	if err := m.armPolicyBootstrap(missing); err != nil {
+		return fmt.Errorf("arm policy bootstrap: %w", err)
+	}
+	if err := m.armHFBootstrap(missing); err != nil {
+		return fmt.Errorf("restore host-firewall bootstrap: %w", err)
 	}
 
 	if err := m.objs.Params.Put(cfgVNI, vni); err != nil {
@@ -123,6 +145,18 @@ func (m *Manager) Load(vni uint32) error {
 	}
 	if err := m.objs.LbProg.Put(uint32(3), uint32(m.objs.CozyplaneHfEgress.FD())); err != nil {
 		return fmt.Errorf("populate hf tail-call slot 3: %w", err)
+	}
+
+	// Publish CNI classifiers only after every firewall/LB target is ready.
+	progPath := filepath.Join(PinRoot, progPinName)
+	_ = os.Remove(progPath)
+	if err := m.objs.CozyplaneFromPod.Pin(progPath); err != nil {
+		return fmt.Errorf("pin from_pod program: %w", err)
+	}
+	toPodPath := filepath.Join(PinRoot, toPodPinName)
+	_ = os.Remove(toPodPath)
+	if err := m.objs.CozyplaneToPod.Pin(toPodPath); err != nil {
+		return fmt.Errorf("pin to_pod program: %w", err)
 	}
 
 	return nil
@@ -178,7 +212,7 @@ func (m *Manager) AttachUplink() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := AttachEgress(idx, m.objs.CozyplaneFromPod); err != nil {
+	if err := attachEgressFirst(idx, m.objs.CozyplaneFromPod); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -194,7 +228,7 @@ func (m *Manager) AttachUplinkIngress() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := AttachIngress(idx, m.objs.CozyplaneFromUplink); err != nil {
+	if err := attachIngressFirst(idx, m.objs.CozyplaneFromUplink); err != nil {
 		return "", err
 	}
 	// from_pod redirects floating-IP replies out this interface (redirect_neigh).
@@ -309,6 +343,28 @@ func (m *Manager) SetNodeRemote(addr, geneveIP net.IP) error {
 	return m.objs.NodeRemotes.Put(key, binary.BigEndian.Uint32(ip4))
 }
 
+// SetOverlayNode authorizes an underlay endpoint to supply tunnel metadata.
+// This map is deliberately unpinned; the live Node watch rebuilds its trust.
+func (m *Manager) SetOverlayNode(ip net.IP) error {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return fmt.Errorf("overlay node endpoint must be IPv4: %v", ip)
+	}
+	return m.objs.OverlayNodes.Put(binary.BigEndian.Uint32(ip4), uint8(1))
+}
+
+func (m *Manager) DelOverlayNode(ip net.IP) error {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil
+	}
+	err := m.objs.OverlayNodes.Delete(binary.BigEndian.Uint32(ip4))
+	if isNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 // DelNodeRemote removes a node address from the node_remotes map.
 func (m *Manager) DelNodeRemote(addr net.IP) error {
 	key, err := addr128(addr)
@@ -325,6 +381,8 @@ func (m *Manager) DelNodeRemote(addr net.IP) error {
 // id. A VPC's own CIDR is stored at its own scope; a peering stores each side's
 // CIDR under the other's scope.
 func (m *Manager) SetNetwork(scope uint32, cidr string, id uint32) error {
+	m.networkMu.Lock()
+	defer m.networkMu.Unlock()
 	key, err := lpmKey(scope, cidr)
 	if err != nil {
 		return err
@@ -334,6 +392,8 @@ func (m *Manager) SetNetwork(scope uint32, cidr string, id uint32) error {
 
 // DelNetwork removes a (scope, CIDR) entry from the networks map.
 func (m *Manager) DelNetwork(scope uint32, cidr string) error {
+	m.networkMu.Lock()
+	defer m.networkMu.Unlock()
 	key, err := lpmKey(scope, cidr)
 	if err != nil {
 		return err
@@ -344,56 +404,22 @@ func (m *Manager) DelNetwork(scope uint32, cidr string) error {
 	return nil
 }
 
-// PeerNet is a peering delivery entry: within Scope, CIDR resolves to Net (the
-// peer's network id), so from_pod/to_pod can find and admit peered traffic.
+// PeerNet is a scoped network CIDR entry. Peer entries resolve to another
+// network; own entries have Scope == Net.
 type PeerNet struct {
 	Scope uint32
 	CIDR  string
 	Net   uint32
 }
 
-// SyncPeerNetworks makes the networks map's cross-scope (peer) entries exactly
-// `desired`, leaving own-CIDR entries untouched. A peer entry is identifiable
-// because its value differs from its scope (an own entry maps a VPC's CIDR to
-// its own id); enumerating the pinned map lets a restarted agent prune
-// peerings deleted while it was down. Mirrors the diff-against-pinned-map
-// pattern used for the peers and gateways maps.
+// SyncPeerNetworks replaces only cross-scope network rows.
 func (m *Manager) SyncPeerNetworks(desired []PeerNet) error {
-	want := map[overlayLpmKey]uint32{}
-	for _, d := range desired {
-		key, err := lpmKey(d.Scope, d.CIDR)
-		if err != nil {
-			return err
-		}
-		want[key] = d.Net
-	}
+	return m.syncNetworkPartition(desired, false)
+}
 
-	var key overlayLpmKey
-	var val uint32
-	var stale []overlayLpmKey
-	it := m.objs.Networks.Iterate()
-	for it.Next(&key, &val) {
-		if val == key.ScopeNet {
-			continue // own-CIDR entry, not ours to touch
-		}
-		if _, ok := want[key]; !ok {
-			stale = append(stale, key)
-		}
-	}
-	if err := it.Err(); err != nil {
-		return fmt.Errorf("iterate networks: %w", err)
-	}
-	for _, k := range stale {
-		if err := m.objs.Networks.Delete(k); err != nil && !isNotExist(err) {
-			return err
-		}
-	}
-	for k, v := range want {
-		if err := m.objs.Networks.Put(k, v); err != nil {
-			return err
-		}
-	}
-	return nil
+// SyncOwnNetworks replaces only own-CIDR network rows from a complete snapshot.
+func (m *Manager) SyncOwnNetworks(desired []PeerNet) error {
+	return m.syncNetworkPartition(desired, true)
 }
 
 // DelRemote removes a (scope, CIDR) entry from the remotes map.
@@ -422,20 +448,12 @@ func lpmKey(scope uint32, cidr string) (overlayLpmKey, error) {
 	if err != nil {
 		return overlayLpmKey{}, fmt.Errorf("parse CIDR %q: %w", cidr, err)
 	}
-	addr, err := addr128(ipnet.IP)
+	addr, bits, err := cidrAddressPrefix(ipnet)
 	if err != nil {
 		return overlayLpmKey{}, err
 	}
-	ones, _ := ipnet.Mask.Size()
-	// A v4 CIDR sits under the /96 NAT64 prefix, so its match length includes
-	// those 96 leading bits; a v6 CIDR uses its own length. The 32-bit scope net
-	// always leads the key (fully specified), so lookups never cross scopes.
-	off := uint32(0)
-	if ipnet.IP.To4() != nil {
-		off = 96
-	}
 	return overlayLpmKey{
-		Prefixlen: 32 + off + uint32(ones),
+		Prefixlen: 32 + bits,
 		ScopeNet:  scope,
 		Addr:      addr,
 	}, nil

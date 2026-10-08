@@ -21,6 +21,7 @@ import (
 	"errors"
 
 	"github.com/lllamnyp/cozyplane/api/sdn"
+	"github.com/lllamnyp/cozyplane/internal/floatingvalidation"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -84,7 +85,8 @@ func (floatingIPStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime
 }
 
 func (floatingIPStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	s := obj.(*sdn.FloatingIP).Spec
+	return floatingvalidation.Validate(s.VPCRef.Name, s.Target, s.LoadBalancerClass, s.AddressClaimName)
 }
 
 // WarningsOnCreate returns warnings for the creation of the given object.
@@ -103,8 +105,11 @@ func (floatingIPStrategy) AllowUnconditionalUpdate() bool {
 func (floatingIPStrategy) Canonicalize(obj runtime.Object) {
 }
 
-func (floatingIPStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+func (s floatingIPStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
+	if obj.(*sdn.FloatingIP).Spec == old.(*sdn.FloatingIP).Spec {
+		return nil // Preserve metadata-only cleanup of unchanged legacy input.
+	}
+	return s.Validate(ctx, obj)
 }
 
 // WarningsOnUpdate returns warnings for the given update.

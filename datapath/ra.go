@@ -19,8 +19,11 @@ package datapath
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -45,11 +48,70 @@ import (
 // raInterval is the unsolicited-RA period (also the fallback rescan cadence).
 const raInterval = 200 * time.Second
 
+const ipv6SolicitationInterval = 100 * time.Millisecond
+
+type raWorker struct {
+	identity string
+	cancel   context.CancelFunc
+	done     chan struct{}
+}
+
+func raIdentity(link netlink.Link) string {
+	ip := raEligible(link)
+	if ip == nil {
+		return ""
+	}
+	raw, _, _, _ := parseVethAlias(link.Attrs().Alias)
+	cid, iface := VethSandbox(link.Attrs().Alias)
+	return fmt.Sprintf("%s|%d|%s|%s|%s|%s|%s", link.Attrs().Name, PortNet(raw), ip, link.Attrs().HardwareAddr, cid, iface, VethPortIdentity(link.Attrs().Alias).UID)
+}
+
+func reconcileRAWorkers(ctx context.Context, serving map[int]*raWorker, links []netlink.Link, start func(context.Context, netlink.Link)) {
+	desired := map[int]netlink.Link{}
+	for _, link := range links {
+		if raIdentity(link) != "" {
+			desired[link.Attrs().Index] = link
+		}
+	}
+	for idx, worker := range serving {
+		finished := false
+		select {
+		case <-worker.done:
+			finished = true
+		default:
+		}
+		link := desired[idx]
+		if !finished && link != nil && worker.identity == raIdentity(link) {
+			continue
+		}
+		worker.cancel()
+		<-worker.done
+		delete(serving, idx)
+	}
+	for idx, link := range desired {
+		if serving[idx] != nil || ctx.Err() != nil {
+			continue
+		}
+		child, cancel := context.WithCancel(ctx)
+		worker := &raWorker{identity: raIdentity(link), cancel: cancel, done: make(chan struct{})}
+		serving[idx] = worker
+		go func() { defer close(worker.done); start(child, link) }()
+	}
+}
+
 // RunRAResponder serves Router Advertisements on every v6 VPC pod veth until
 // ctx ends. mtu is the pod MTU to advertise; rdnss (optional) is the v6
 // resolver address to hand out.
 func RunRAResponder(ctx context.Context, mtu int, rdnss net.IP, log *slog.Logger) {
-	serving := map[int]context.CancelFunc{}
+	serving := map[int]*raWorker{}
+	defer func() {
+		for _, worker := range serving {
+			worker.cancel()
+		}
+		for _, worker := range serving {
+			<-worker.done
+		}
+	}()
 
 	updates := make(chan netlink.LinkUpdate, 64)
 	done := make(chan struct{})
@@ -64,37 +126,40 @@ func RunRAResponder(ctx context.Context, mtu int, rdnss net.IP, log *slog.Logger
 			log.Warn("RA responder: list links", "err", err)
 			return
 		}
-		alive := map[int]bool{}
-		for _, l := range links {
-			ip6 := raEligible(l)
-			if ip6 == nil {
-				continue
-			}
-			idx := l.Attrs().Index
-			alive[idx] = true
-			if _, ok := serving[idx]; ok {
-				continue
-			}
-			cctx, cancel := context.WithCancel(ctx)
-			serving[idx] = cancel
-			go serveRA(cctx, l.Attrs().Name, idx, l.Attrs().HardwareAddr, ip6, mtu, rdnss, log)
-		}
-		for idx, cancel := range serving {
-			if !alive[idx] {
-				cancel()
-				delete(serving, idx)
-			}
-		}
+		reconcileRAWorkers(ctx, serving, links, func(child context.Context, l netlink.Link) {
+			serveRA(child, l.Attrs().Name, l.Attrs().Index, l.Attrs().HardwareAddr, raEligible(l), mtu, rdnss, log)
+		})
 	}
 
 	scan()
+	raRescanLoop(ctx, updates, scan)
+}
+
+func raRescanLoop(ctx context.Context, updates <-chan netlink.LinkUpdate, scan func()) {
 	tick := time.NewTicker(raInterval)
 	defer tick.Stop()
+	var timer *time.Timer
+	var pending <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-updates:
+		case _, open := <-updates:
+			if !open {
+				updates = nil
+			} else {
+				if pending == nil {
+					timer = time.NewTimer(100 * time.Millisecond)
+					pending = timer.C
+				}
+			}
+		case <-pending:
+			pending = nil
 			scan()
 		case <-tick.C:
 			scan()
@@ -105,6 +170,9 @@ func RunRAResponder(ctx context.Context, mtu int, rdnss net.IP, log *slog.Logger
 // raEligible returns the pod's v6 VPC address when the link is a plain (non-
 // gateway) VPC pod veth carrying one, else nil.
 func raEligible(l netlink.Link) net.IP {
+	if l.Type() != "veth" {
+		return nil
+	}
 	name := l.Attrs().Name
 	if len(name) < 3 || name[:3] != podVethPrefix {
 		return nil
@@ -125,12 +193,19 @@ func raEligible(l netlink.Link) net.IP {
 // (one immediately — the guest may have solicited before we attached — then
 // periodically).
 func serveRA(ctx context.Context, veth string, ifindex int, mac net.HardwareAddr, podIP net.IP, mtu int, rdnss net.IP, log *slog.Logger) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW|unix.SOCK_CLOEXEC, int(htons16(unix.ETH_P_IPV6)))
 	if err != nil {
 		log.Warn("RA responder: socket", "veth", veth, "err", err)
 		return
 	}
 	defer unix.Close(fd)
+	initial, err := netlink.LinkByIndex(ifindex)
+	if err != nil || initial.Attrs().Name != veth || !raEligible(initial).Equal(podIP) {
+		return
+	}
+	identity := raIdentity(initial)
 	if err := unix.Bind(fd, &unix.SockaddrLinklayer{Protocol: htons16(unix.ETH_P_IPV6), Ifindex: ifindex}); err != nil {
 		log.Warn("RA responder: bind", "veth", veth, "err", err)
 		return
@@ -155,6 +230,14 @@ func serveRA(ctx context.Context, veth string, ifindex int, mac net.HardwareAddr
 	dst := &unix.SockaddrLinklayer{Ifindex: ifindex, Halen: 6}
 	copy(dst.Addr[:], frame[0:6])
 	send := func() {
+		if ctx.Err() != nil {
+			return
+		}
+		current, err := netlink.LinkByIndex(ifindex)
+		if err != nil || raIdentity(current) != identity {
+			cancel()
+			return
+		}
 		if err := unix.Sendto(fd, frame, 0, dst); err != nil {
 			log.Warn("RA responder: send", "veth", veth, "err", err)
 		}
@@ -164,9 +247,11 @@ func serveRA(ctx context.Context, veth string, ifindex int, mac net.HardwareAddr
 
 	// The RA's Managed flag points the guest at DHCPv6 for the address itself
 	// (Linux ignores a /128 PIO — see dhcpv6.go); serve that exchange too.
-	go serveDHCPv6(ctx, veth, ifindex, mac, podIP, rdnss, log)
+	var workers sync.WaitGroup
+	defer func() { cancel(); workers.Wait() }() // registered after Close: drain first
+	workers.Go(func() { serveDHCPv6(ctx, veth, ifindex, mac, podIP, rdnss, log) })
 
-	go func() {
+	workers.Go(func() {
 		tick := time.NewTicker(raInterval)
 		defer tick.Stop()
 		for {
@@ -177,19 +262,33 @@ func serveRA(ctx context.Context, veth string, ifindex int, mac net.HardwareAddr
 				send()
 			}
 		}
-	}()
+	})
 
 	buf := make([]byte, 256)
+	tick := time.NewTicker(ipv6SolicitationInterval)
+	defer tick.Stop()
+	tv := unix.Timeval{Sec: 2}
+	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+		log.Warn("RA receive timeout", "err", err)
+		return
+	}
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
 		// A read deadline keeps the loop responsive to ctx cancellation.
-		tv := unix.Timeval{Sec: 2}
-		_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
 		_, _, err := unix.Recvfrom(fd, buf, 0)
 		if ctx.Err() != nil {
 			return
 		}
 		if err != nil {
-			continue // timeout or transient
+			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EINTR) {
+				continue
+			}
+			log.Warn("RA responder: receive ended", "veth", veth, "err", err)
+			return
 		}
 		send() // the filter admitted only RS: answer immediately
 	}

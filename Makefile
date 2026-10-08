@@ -17,6 +17,7 @@ help: ## Display this help.
 .PHONY: generate
 generate: ## Run code generation (deepcopy, conversion, defaults, openapi, clientset).
 	hack/update-codegen.sh
+	bash hack/update-local-crds.sh
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -37,3 +38,4 @@ build: fmt vet ## Build all binaries.
 	go build -o bin/cozyplane-apiserver ./cmd/apiserver
 	go build -o bin/sdn-controller ./cmd/sdn-controller
 	go build -o bin/cozyplane-responder ./cmd/responder
+	go build -o bin/cozyplane-flowctl ./cmd/flowctl
