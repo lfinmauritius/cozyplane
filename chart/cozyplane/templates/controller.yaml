@@ -307,6 +307,9 @@ spec:
             - --vpn-hardened-appliance=true
             {{- end }}
             {{- end }}
+            {{- with .Values.vpn.runtimeClassName }}
+            - {{ printf "--vpn-runtime-class=%s" . | quote }}
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:

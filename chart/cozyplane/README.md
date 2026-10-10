@@ -115,4 +115,21 @@ and both halves can take an existing scrape away silently.**
 Managed VPN appliances use privileged compatibility mode by default. On nodes
 whose kubelet admits the forwarding sysctls, set `vpn.hardenedAppliance=true` to
 drop privileged mode and retain only `NET_ADMIN`, `NET_RAW`, and
-`NET_BIND_SERVICE`.
+`NET_BIND_SERVICE` (plus `BPF` for IPsec and workstation gateways). Baseline tenant
+namespaces also require a dedicated PodSecurity RuntimeClass exemption. Set
+`vpn.runtimeClassName=cozyplane-vpn` together with hardened mode;
+`vpn.runtimeClass.create=true` installs the `runc` RuntimeClass and its
+single-container appliance admission guard (Kubernetes >= 1.30). Defaults remain
+empty/false. For a preexisting class, leave create false and manage an equivalent
+guard externally. The chart never configures Talos admission/kubelet settings or
+changes tenant PodSecurity labels.
+
+Follow [the complete operator procedure](../../docs/vpn.md#runtimeclass-admission-in-baseline-tenant-namespaces)
+before enabling the exemption. Preserve the full PodSecurity entry and other
+machine configuration documents when applying the edited full Talos configuration;
+do not strategically merge the example lists, which can duplicate exemptions and
+prevent API-server startup. Allow the two forwarding sysctls on gateway nodes
+and verify `runc` exists. The guard supports ordinary, warm-standby and
+workstation appliances; active-active has a routing sidecar and is rejected
+by this single-container policy. RuntimeClass changes roll managed appliances
+across namespaces, so inventory existing gateways before a deployment.
