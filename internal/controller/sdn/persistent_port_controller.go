@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -51,8 +52,9 @@ import (
 //     the VM now runs on; the VPC IP + MAC never change. This is the same move
 //     OVN-Kubernetes makes on a logical-switch-port that changes chassis.
 //   - GC: delete the persistent Port only once no virt-launcher pod or owning
-//     VirtualMachine exists. Stopping a VM retains its reservation. CNI DEL never deletes it,
-//     so the IP + MAC survive pod churn and migration.
+//     VirtualMachine exists. Stopping a VM retains its reservation, and
+//     starting it again hands the reservation to the replacement VMI. CNI DEL
+//     never deletes it, so the IP + MAC survive pod churn, restarts and migration.
 type PersistentPortReconciler struct {
 	client.Client
 
@@ -137,6 +139,9 @@ func (r *PersistentPortReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		vm := &unstructured.Unstructured{}
 		vm.SetGroupVersionKind(vmGVK)
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: port.Spec.PodNamespace, Name: vmName}, vm); err == nil {
+			if adopted, err := r.adoptRestartedVMI(ctx, reader, port, vm, vmUID); err != nil || adopted {
+				return ctrl.Result{Requeue: adopted}, err
+			}
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		} else if !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
 			return ctrl.Result{}, fmt.Errorf("confirm VirtualMachine absence: %w", err)
@@ -251,6 +256,38 @@ func (r *PersistentPortReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	log.FromContext(ctx).Info("migration cutover: persistent port re-pointed",
 		"port", port.Name, "vm", vmName, "node", active.Spec.NodeName, "vpcIP", port.Spec.IP)
 	return result, nil
+}
+
+// adoptRestartedVMI hands a retained Port to the VM's replacement VMI. Stopping
+// and starting a VM keeps the VirtualMachine but creates a VMI with a new UID,
+// which the CNI refuses to bind to a Port pinned to the old one. The caller has
+// already confirmed that no launcher of the old VMI remains; the name being
+// taken by another UID proves the old VMI itself is gone. The replacement must
+// be controlled by this very VirtualMachine, so a bare VMI or launcher reusing
+// the name cannot claim the address.
+func (r *PersistentPortReconciler) adoptRestartedVMI(ctx context.Context, reader client.Reader, port *sdnv1alpha1.Port, vm *unstructured.Unstructured, oldUID types.UID) (bool, error) {
+	if vm.GetDeletionTimestamp() != nil {
+		return false, nil
+	}
+	vmi := newVMI()
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: vm.GetNamespace(), Name: vm.GetName()}, vmi); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	ref := metav1.GetControllerOf(vmi)
+	if vmi.GetUID() == "" || vmi.GetUID() == oldUID || vmi.GetDeletionTimestamp() != nil || ref == nil ||
+		ref.APIVersion != vmGVK.GroupVersion().String() || ref.Kind != vmGVK.Kind || ref.Name != vm.GetName() || ref.UID != vm.GetUID() {
+		return false, nil
+	}
+	port.Labels[vmidentity.InstanceUIDLabel] = string(vmi.GetUID())
+	if err := r.Update(ctx, port); err != nil {
+		if apierrors.IsConflict(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("adopt restarted VMI on persistent port %s: %w", port.Name, err)
+	}
+	log.FromContext(ctx).Info("persistent port adopted by restarted VMI",
+		"port", port.Name, "vm", vm.GetName(), "oldVMI", oldUID, "vmi", vmi.GetUID())
+	return true, nil
 }
 
 // activeLauncher returns the running virt-launcher pod that currently owns the

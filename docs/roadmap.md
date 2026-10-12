@@ -437,6 +437,7 @@ split-horizon resolver already gives).
 - [x] DEL preserves the persistent Port; local datapath state cleared by `(net, IP)`
 - [x] Cutover controller re-points `spec.node` to the active launcher (`kubevirt.io/nodeName`)
 - [x] GC the persistent Port when the VM's pods are all gone
+- [x] Stop/start hands the retained persistent Port to the replacement VMI of the same VirtualMachine (the CNI refused the new VMI UID, leaving the launcher in `ContainerCreating`)
 - [x] IP + MAC preservation validated end-to-end on the dev cluster (both directions)
 - [x] IPv6 VM live migration demonstrated on a v4-only cluster (IP+MAC preserved, sub-second cutover)
 - [x] Staged locals: same-node delivery flips at cutover on both ends (target's entry gated on `spec.node`, programmed from the veth alias at cutover; source's removed symmetrically) — validated on the dev cluster with a bandwidth-throttled migration: target locals observed ABSENT mid-window, flip at cutover, gap patterns identical across observers (no path-asymmetric loss), IP+MAC preserved through two consecutive migrations
