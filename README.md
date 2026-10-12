@@ -94,6 +94,12 @@ outstanding.
 
 ## Documentation
 
+For managed VPNs in PodSecurity baseline tenant namespaces, enable hardened
+mode with a dedicated RuntimeClass exemption. The cluster operator must allow
+the forwarding sysctls and preserve existing admission defaults; the chart
+does not change tenant labels or Talos configuration. See the
+[VPN installation procedure](docs/vpn.md#runtimeclass-admission-in-baseline-tenant-namespaces).
+
 Start with [design.md](docs/design.md) (the vision and the **design tenets**), then
 [internals.md](docs/internals.md) (the as-built datapath).
 

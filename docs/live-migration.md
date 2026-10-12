@@ -143,8 +143,13 @@ it must not remove a replacement started after cancellation.
 
 Ports are cluster-scoped, so a namespaced VMI ownerRef can't GC them. The
 persistent-Port controller owns the lifecycle: it **keeps** the Port while any
-virt-launcher pod (or the VMI) for its identity exists, and **deletes** it once
-they are all gone (VM stopped/deleted). A single virt-launcher pod's CNI DEL must
+virt-launcher pod for its identity or the owning VirtualMachine exists, and
+**deletes** it once both are gone (VM deleted). A stopped VM keeps its address.
+The Port records the VMI UID it was claimed by, and the CNI binds only a launcher
+of that VMI; starting a stopped VM creates a new VMI, so once no launcher of the
+old VMI remains and the name is held by a VMI that the **same VirtualMachine**
+controls, the controller re-keys the Port to it (UID/resourceVersion checked).
+A bare VMI or launcher reusing the name does not qualify. A single virt-launcher pod's CNI DEL must
 **not** delete a persistent Port (that is what lets IP+MAC survive pod churn) — it
 only clears that pod's local datapath state; contrast the ephemeral path, where
 DEL deletes the Port. The sever finalizer still guarantees the owning node drains

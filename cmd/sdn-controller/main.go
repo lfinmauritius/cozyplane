@@ -81,6 +81,7 @@ func main() {
 		vpnMaxGateways       int
 		vpnMaxConnections    int
 		vpnHardened          bool
+		vpnRuntimeClass      string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -112,6 +113,8 @@ func main() {
 		"per-gateway cap on VPN connections/peers (0 uses the built-in default)")
 	flag.BoolVar(&vpnHardened, "vpn-hardened-appliance", false,
 		"use pod forwarding sysctls and only NET_ADMIN/NET_RAW/NET_BIND_SERVICE instead of privileged VPN appliances")
+	flag.StringVar(&vpnRuntimeClass, "vpn-runtime-class", "",
+		"RuntimeClass for VPN appliance pods; requires matching cluster admission and runtime configuration")
 
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
@@ -210,6 +213,7 @@ func main() {
 		vpnMaxGateways:    vpnMaxGateways,
 		vpnMaxConnections: vpnMaxConnections,
 		vpnHardened:       vpnHardened,
+		vpnRuntimeClass:   vpnRuntimeClass,
 	}
 	gate := &apigate.Gate{
 		Name: sdnv1alpha1.SchemeGroupVersion.String(),
@@ -252,6 +256,7 @@ type sdnControllerConfig struct {
 	vpnMaxGateways    int
 	vpnMaxConnections int
 	vpnHardened       bool
+	vpnRuntimeClass   string
 }
 
 // setupSDNControllers registers every controller that watches a
@@ -383,6 +388,7 @@ func setupSDNControllers(mgr manager.Manager, cfg sdnControllerConfig) error {
 				MaxGatewaysPerNamespace:  cfg.vpnMaxGateways,
 				MaxConnectionsPerGateway: cfg.vpnMaxConnections,
 				HardenedAppliance:        cfg.vpnHardened,
+				RuntimeClassName:         cfg.vpnRuntimeClass,
 				InternalCIDRs:            parseCIDRs(cfg.internalCIDRs),
 			},
 		}).SetupWithManager(mgr); err != nil {

@@ -805,10 +805,12 @@ what was done:
 - **Capability-bounded mode is available, compatibility mode remains the
   default.** `--vpn-hardened-appliance` (chart
   `vpn.hardenedAppliance`) moves forwarding to pod-level sysctls, drops all
-  capabilities, and adds only `NET_ADMIN`+`NET_RAW`+`NET_BIND_SERVICE` with
-  privilege escalation disabled. Enable it only after the kubelet admits the two
-  forwarding sysctls; clusters that do not retain the privileged compatibility
-  path and should isolate it on the dedicated gateway node-pool.
+  capabilities, and adds only `NET_ADMIN`+`NET_RAW`+`NET_BIND_SERVICE` (plus
+  `BPF` for IPsec and workstation gateways) with privilege escalation disabled.
+  This alone does not pass PodSecurity baseline: those capabilities and the two
+  forwarding sysctls still require an exemption. Keep the appliance in its
+  tenant namespace, keep that namespace's PodSecurity posture, and use the
+  dedicated RuntimeClass procedure below.
 - **Tunnel MTU derives from `VPC.spec.mtu`.** The controller subtracts a
   conservative worst-case outer overhead (80 bytes for WireGuard, 128 for
   ESP-in-UDP) and configures the WireGuard/xfrm interface accordingly. This
@@ -827,6 +829,145 @@ what was done:
   The SEC188 guard denies off-VPC traffic while a complete snapshot cannot be
   installed, preventing cleartext fallback. A saturation metric and fair
   per-tenant quotas remain owed for availability (increment 6 guardrail).
+
+#### RuntimeClass admission in baseline tenant namespaces
+
+The controller flag
+`--vpn-runtime-class` (chart `vpn.runtimeClassName`) sets the appliance pod
+template's `runtimeClassName`; empty preserves the existing behavior. Changing
+or clearing it updates the Deployment or StatefulSet template and rolls pods.
+Warm standby uses a two-replica Deployment; active-active uses a StatefulSet
+with a routing sidecar.
+Reconciliation must restore a privileged container context that drifts from
+hardened configuration, and must tolerate Kubernetes pod-template defaults
+without causing repeated StatefulSet writes or rollouts. Compare owned runtime
+and security fields explicitly, while accepting defaulted plumbing fields.
+
+Use Kubernetes >= 1.30 and a CRI handler named `runc` on every selected gateway
+node. Configure these chart values together:
+
+```yaml
+vpn:
+  hardenedAppliance: true
+  runtimeClassName: cozyplane-vpn
+  runtimeClass:
+    create: true
+```
+
+`create: true` installs the RuntimeClass (`handler: runc`) and a fail-closed
+ValidatingAdmissionPolicy plus its Deny binding. It requires a nonempty class
+name and hardened mode. The policy permits only the configured Cozyplane image,
+one `vpn-gateway` container running the WireGuard or IPsec binary, no privileged
+mode, all capabilities dropped and only the three networking capabilities
+(plus `BPF`, which IPsec and workstation gateways need for their source
+filters) added, no privilege escalation, host namespaces, host paths, init or ephemeral
+containers. Probe HTTP/TCP host overrides are forbidden, preserving the
+baseline protection added in Kubernetes 1.34 even though this class is exempt.
+It also restricts mounts, environment (`POD_NAME` and the literal
+`VPN_CONFIG_CHECKSUM` only) and exec hooks so a Pod author cannot replace the
+executable while retaining the allowed image name.
+The appliance needs no Kubernetes API credentials; hardened pods disable token
+automount. The single-container policy intentionally excludes active-active.
+If using an externally managed RuntimeClass (`create: false`), install an
+equivalent guard before granting its PodSecurity exemption. Protect these
+cluster-scoped objects with platform RBAC; the policy does not constrain an
+administrator who can replace the policy itself or use Pod exec/attach; keep
+those permissions out of tenant and controller roles.
+
+The policy and binding are retained with Helm's `resource-policy: keep` when
+the class name changes, creation is disabled or the release is uninstalled.
+An old Pod still carries its immutable RuntimeClass and could otherwise remain
+PodSecurity-exempt without its guard during a rollout. Retire the old exemption
+on every API server and drain all Pods using it before manually deleting the
+retained policy and binding. Retire unused guards at that point to avoid
+accumulating admission policies. The RuntimeClass itself is not retained.
+
+The **operator** configures PodSecurity and kubelet prerequisites; the chart
+does not patch Talos or label tenant namespaces privileged. On Talos, the
+following is the desired state of these fields in the existing full machine
+configuration; it is **not** a strategic merge patch to apply as-is:
+
+```yaml
+cluster:
+  apiServer:
+    admissionControl:
+      - name: PodSecurity
+        configuration:
+          apiVersion: pod-security.admission.config.k8s.io/v1alpha1
+          kind: PodSecurityConfiguration
+          defaults:
+            enforce: baseline
+            enforce-version: latest
+            audit: restricted
+            audit-version: latest
+            warn: restricted
+            warn-version: latest
+          exemptions:
+            namespaces: [kube-system]
+            runtimeClasses: [cozyplane-vpn]
+            usernames: []
+machine:
+  kubelet:
+    extraConfig:
+      allowedUnsafeSysctls:
+        - net.ipv4.ip_forward
+        - net.ipv6.conf.all.forwarding
+```
+
+`admissionControl` is a **list**: retain the complete PodSecurity entry and any
+other admission entries, defaults and exemptions from the actual configuration.
+An abbreviated replacement can discard existing defaults. Preserve any existing
+unsafe sysctl allowlist as well. Talos strategic merge appends list elements:
+restating `namespaces: [kube-system]` duplicates the existing exemption, and
+PodSecurity refuses to initialize with duplicate namespaces or RuntimeClasses.
+The lab reproduced this API-server startup failure. Do not apply the complete
+example as a strategic merge patch, including on retries. JSON6902 replacement
+is also unavailable for multi-document machine configurations.
+
+Edit the relevant fields in each node's existing complete configuration, retain
+all other fields/documents, and use `talosctl apply-config --mode no-reboot` on
+the resulting full file. Keep each exemption and sysctl exactly once. Protect
+the temporary full configuration because it contains credentials; remove it
+after application and never add it to Git. First validate with `--dry-run`, then
+apply without that flag. Check the live configuration and direct API admission
+after each node before proceeding to the next.
+
+Install the guard before enabling the exemption;
+apply the Talos configuration node by node, control planes first, anticipating
+the API server and kubelet restarts. The exemption name must match the chart
+value on every API server; kubelet permissions must be present on every gateway
+node. RuntimeClass selects a handler, not a separate security sandbox.
+
+Verify in an isolated baseline tenant namespace: the actual hardened appliance
+Pod with the class is admitted, its identical spec without the class is denied
+by PodSecurity, and a generic `NET_ADMIN` Pod with the class is denied by the
+admission guard. Check the policy's `status.typeChecking.expressionWarnings`
+before relying on it. Remove any temporary `enforce=privileged` label first;
+do not change baseline labels in other tenant namespaces.
+
+For the lab exercise, create an IPsec gateway spanning two test VPCs and a
+connection to a TEST-NET peer. Record Pod UID/creation time, Running/Ready,
+`ApplianceReady=True` and the allocated address (the TEST-NET peer is not
+expected to establish a tunnel). Merge-patch `additionalVPCRefs: null`, then
+record Pod UID/age again and verify the obsolete binding/route is removed.
+The changed attachment annotation must replace the Pod, because CNI attachment
+layout is fixed at sandbox creation. Do not claim this live exercise passed
+from local template tests alone.
+
+The three-node Talos lab passed this exercise on 2026-10-08: admission was
+verified against every API server, the ordinary IPsec appliance ran with the
+actual hardened context in a baseline tenant namespace, and removing the second
+VPC replaced the Ready Pod while retaining its endpoint address. The obsolete
+binding and route disappeared. The TEST-NET peer did not establish a tunnel.
+Validation used a temporary controller binary; test fixtures were removed with
+UID preconditions and the original controller/Flux state was restored. The
+cluster prerequisites and dedicated admission guard remain installed. Slow SDN
+etcd responses caused writes to time out after committing; verify the recorded
+object identity and state before retrying a timed-out write.
+
+The guard was carried onto the integrated main on 2026-10-10 and widened for the
+workstation and IPsec appliances of that tree (`BPF` capability, configuration
+checksum variable); the cluster prerequisites above were already in place.
 
 ## 6. Metering and observability
 

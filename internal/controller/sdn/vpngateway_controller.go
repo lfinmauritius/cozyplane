@@ -90,6 +90,9 @@ type VPNGatewayConfig struct {
 	// tunnel backends need. The cluster must allow the pod-level forwarding
 	// sysctls; false preserves compatibility with clusters that do not.
 	HardenedAppliance bool
+	// RuntimeClassName selects an operator-managed runtime and admission exemption.
+	// Empty leaves the pod runtime unspecified, preserving compatibility.
+	RuntimeClassName string
 	// InternalCIDRs are the cluster-internal networks (pod, service, node) a
 	// remote CIDR must not overlap — the route-CIDR deny-set. A tenant declaring
 	// one as a tunnel remote could otherwise redirect the VPC's own internal
@@ -1865,11 +1868,8 @@ func (r *VPNGatewayReconciler) ensureDeployment(ctx context.Context, gw *sdnv1al
 		if err := requireVPNOwner(existing, gw); err != nil {
 			return err
 		}
-		if !equality.Semantic.DeepDerivative(desired.Spec.Template.Spec.Containers, existing.Spec.Template.Spec.Containers) ||
-			!equality.Semantic.DeepDerivative(desired.Spec.Template.Annotations, existing.Spec.Template.Annotations) ||
-			!equality.Semantic.DeepEqual(desired.Spec.Replicas, existing.Spec.Replicas) ||
-			!equality.Semantic.DeepEqual(desired.Spec.Template.Spec.Affinity, existing.Spec.Template.Spec.Affinity) ||
-			!equality.Semantic.DeepEqual(desired.Spec.Template.Spec.NodeSelector, existing.Spec.Template.Spec.NodeSelector) {
+		if vpnPodTemplateChanged(desired.Spec.Template, existing.Spec.Template) ||
+			!equality.Semantic.DeepEqual(desired.Spec.Replicas, existing.Spec.Replicas) {
 			existing.Spec = desired.Spec
 			if err := r.Update(ctx, existing); err != nil {
 				return fmt.Errorf("update appliance deployment: %w", err)
@@ -1936,7 +1936,7 @@ func (r *VPNGatewayReconciler) ensureStatefulSet(ctx context.Context, gw *sdnv1a
 			return err
 		}
 		if !equality.Semantic.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas) ||
-			!equality.Semantic.DeepEqual(existing.Spec.Template, desired.Spec.Template) ||
+			vpnPodTemplateChanged(desired.Spec.Template, existing.Spec.Template) ||
 			existing.Spec.ServiceName != desired.Spec.ServiceName ||
 			existing.Spec.PodManagementPolicy != desired.Spec.PodManagementPolicy {
 			existing.Spec.Replicas = desired.Spec.Replicas
@@ -1950,6 +1950,39 @@ func (r *VPNGatewayReconciler) ensureStatefulSet(ctx context.Context, gw *sdnv1a
 		}
 	}
 	return nil
+}
+
+// vpnPodTemplateChanged accepts API defaults in plumbing fields but compares
+// controller-owned runtime/security fields exactly, including their removal.
+// DeepDerivative alone ignores nil Privileged and RuntimeClassName; full template
+// equality instead causes a perpetual rollout when the API reapplies defaults.
+func vpnPodTemplateChanged(desired, existing corev1.PodTemplateSpec) bool {
+	d, e := desired.Spec, existing.Spec
+	security := func(sc *corev1.PodSecurityContext) corev1.PodSecurityContext {
+		if sc == nil {
+			return corev1.PodSecurityContext{}
+		}
+		return *sc
+	}
+	if !equality.Semantic.DeepDerivative(desired, existing) ||
+		len(d.Containers) != len(e.Containers) ||
+		d.HostNetwork != e.HostNetwork || d.HostPID != e.HostPID || d.HostIPC != e.HostIPC ||
+		!equality.Semantic.DeepEqual(d.RuntimeClassName, e.RuntimeClassName) ||
+		!equality.Semantic.DeepEqual(security(d.SecurityContext), security(e.SecurityContext)) ||
+		!equality.Semantic.DeepEqual(d.AutomountServiceAccountToken, e.AutomountServiceAccountToken) ||
+		!equality.Semantic.DeepEqual(d.Affinity, e.Affinity) ||
+		!equality.Semantic.DeepEqual(d.NodeSelector, e.NodeSelector) ||
+		!equality.Semantic.DeepEqual(d.Tolerations, e.Tolerations) ||
+		desired.Annotations[sdnv1alpha1.AnnotationVPC] != existing.Annotations[sdnv1alpha1.AnnotationVPC] ||
+		desired.Annotations[sdnv1alpha1.AnnotationNetworks] != existing.Annotations[sdnv1alpha1.AnnotationNetworks] {
+		return true
+	}
+	for i := range d.Containers {
+		if !equality.Semantic.DeepEqual(d.Containers[i].SecurityContext, e.Containers[i].SecurityContext) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *VPNGatewayReconciler) statefulSet(gw *sdnv1alpha1.VPNGateway, backend, checksum string) *appsv1.StatefulSet {
@@ -2008,7 +2041,14 @@ func (r *VPNGatewayReconciler) deployment(gw *sdnv1alpha1.VPNGateway, backend, c
 	}
 	securityContext := &corev1.SecurityContext{Privileged: new(true)}
 	var podSecurityContext *corev1.PodSecurityContext
+	var automountToken *bool
+	var runtimeClassName *string
+	if r.Config.RuntimeClassName != "" {
+		runtimeClassName = new(r.Config.RuntimeClassName)
+	}
 	if r.Config.HardenedAppliance {
+		// The appliances consume mounted configuration, not the Kubernetes API.
+		automountToken = new(false)
 		securityContext = &corev1.SecurityContext{
 			AllowPrivilegeEscalation: new(false),
 			Capabilities: &corev1.Capabilities{
@@ -2098,7 +2138,9 @@ func (r *VPNGatewayReconciler) deployment(gw *sdnv1alpha1.VPNGateway, backend, c
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					SecurityContext: podSecurityContext,
+					SecurityContext:              podSecurityContext,
+					RuntimeClassName:             runtimeClassName,
+					AutomountServiceAccountToken: automountToken,
 					// Guardrails (increment 6): dedicated gateway node-pool placement
 					// and mandatory resource bounds keep a heavy tunnel off the
 					// tenant workloads' nodes and its blast radius bounded.

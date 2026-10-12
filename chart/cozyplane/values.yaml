@@ -81,6 +81,13 @@ vpn:
   # net.ipv6.conf.all.forwarding as pod sysctls. Drops privileged mode and keeps
   # only NET_ADMIN, NET_RAW and NET_BIND_SERVICE.
   hardenedAppliance: false
+  # Dedicated PodSecurity-exempt class. Use together with hardenedAppliance;
+  # the operator must configure admission exemption and kubelet sysctl admission.
+  runtimeClassName: ""
+  runtimeClass:
+    # Create the runc RuntimeClass and its appliance-only admission guard.
+    # Requires Kubernetes >= 1.30, a name and hardenedAppliance=true.
+    create: false
   # Prometheus-compatible VPN metrics are exposed by every tunnel appliance on
   # its named vpn-metrics port. Resources below are rendered only when their
   # respective operator CRDs are installed in the cluster.
