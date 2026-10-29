@@ -201,6 +201,10 @@ spec:
             # SNATed to the node address, giving pods an off-cluster return path.
             - "--cluster-cidr={{ .Values.egress.clusterCIDR }}"
             - "--masquerade={{ .Values.egress.masquerade | default "bpf" }}"
+            {{- with .Values.egress.podCIDRExclude }}
+            # Blocks of the pod pool no new pod address is drawn from.
+            - "--pod-cidr-exclude={{ join "," . }}"
+            {{- end }}
             {{- end }}
             {{- $internal := concat (list .Values.egress.clusterCIDR .Values.egress.serviceCIDR) .Values.egress.internalCIDRs | compact }}
             {{- if $internal }}

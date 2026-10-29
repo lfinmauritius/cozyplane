@@ -101,13 +101,23 @@ type fabricAllocation struct {
 	Created   []localv1alpha1.FabricIP
 }
 
-func claimFabricIPs(ctx context.Context, client localclientset.Interface, cidrs []string, node, podNS, podName, podUID, containerID, ifName string) (*fabricAllocation, error) {
+func claimFabricIPs(ctx context.Context, client localclientset.Interface, cidrs, excluded []string, node, podNS, podName, podUID, containerID, ifName string) (*fabricAllocation, error) {
 	if podUID == "" || containerID == "" || ifName == "" {
 		return nil, fmt.Errorf("fabric allocation requires pod UID, container ID and interface")
 	}
+	// A malformed exclusion fails the ADD: allocating into a block the
+	// platform reserved is worse than not allocating at all.
+	var holes []*net.IPNet
+	for _, cidr := range excluded {
+		_, hole, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("parse excluded pod CIDR %q: %w", cidr, err)
+		}
+		holes = append(holes, hole)
+	}
 	claimed := &fabricAllocation{}
 	for _, cidr := range cidrs {
-		ip, created, err := claimOne(ctx, client, cidr, node, podNS, podName, podUID, containerID, ifName)
+		ip, created, err := claimOne(ctx, client, cidr, holes, node, podNS, podName, podUID, containerID, ifName)
 		if err != nil {
 			// Roll back whatever we already took for this pod: a half-addressed
 			// pod is worse than a failed ADD, and the addresses would leak
@@ -128,7 +138,7 @@ func claimFabricIPs(ctx context.Context, client localclientset.Interface, cidrs 
 	return claimed, nil
 }
 
-func claimOne(ctx context.Context, client localclientset.Interface, cidr, node, podNS, podName, podUID, containerID, ifName string) (net.IP, *localv1alpha1.FabricIP, error) {
+func claimOne(ctx context.Context, client localclientset.Interface, cidr string, holes []*net.IPNet, node, podNS, podName, podUID, containerID, ifName string) (net.IP, *localv1alpha1.FabricIP, error) {
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse pod CIDR %q: %w", cidr, err)
@@ -198,6 +208,12 @@ func claimOne(ctx context.Context, client localclientset.Interface, cidr, node, 
 			candidate = nextIP(candidate)
 			continue
 		}
+		if hole := containingNet(holes, candidate); hole != nil {
+			// Jump the whole block in one step: a /21 holds more addresses
+			// than the walk is allowed to try.
+			candidate = nextIP(lastAddress(hole))
+			continue
+		}
 		fip := &localv1alpha1.FabricIP{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: localv1alpha1.FabricIPName(candidate.String()),
@@ -242,6 +258,25 @@ func claimOne(ctx context.Context, client localclientset.Interface, cidr, node, 
 // pool.
 func isReserved(ipnet *net.IPNet, ip net.IP) bool {
 	return ipam.IsPoolReserved(ipnet, ip)
+}
+
+// containingNet returns the first of nets that contains ip, or nil.
+func containingNet(nets []*net.IPNet, ip net.IP) *net.IPNet {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return n
+		}
+	}
+	return nil
+}
+
+// lastAddress returns the highest address of n, in n's own width.
+func lastAddress(n *net.IPNet) net.IP {
+	out := cloneIP(n.IP)
+	for i := range out {
+		out[i] |= ^n.Mask[i]
+	}
+	return out
 }
 
 // addOffset returns base + n (big-endian, both families).

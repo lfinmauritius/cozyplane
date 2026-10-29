@@ -48,6 +48,11 @@ type AgentState struct {
 	// do with which node it landed on, so a node cannot exhaust while the
 	// cluster has room, and an address can follow a pod across a node move.
 	ClusterPodCIDRs []string `json:"clusterPodCIDRs,omitempty"`
+	// ExcludedPodCIDRs are blocks of ClusterPodCIDRs no new pod address is
+	// drawn from — a platform reservation, such as the block Cozystack gives
+	// Cilium's router addresses. A sandbox already holding an address there
+	// keeps it until the pod is recreated.
+	ExcludedPodCIDRs []string `json:"excludedPodCIDRs,omitempty"`
 	// MTU is the pod MTU (underlay MTU minus Geneve overhead).
 	MTU int `json:"mtu"`
 	// Namespace is the agent's own (system) namespace. Gateway-attach

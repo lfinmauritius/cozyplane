@@ -349,7 +349,7 @@ func addDefault(ctx context.Context, args *skel.CmdArgs, conf *NetConf, podNS, p
 	// the FLAT cluster-wide pool — a pod's address has nothing to do with which
 	// node it landed on. The claim is a FabricIP object: atomic by name,
 	// GC-able by the controller (docs/api-groups.md).
-	allocation, err := claimFabricIPs(ctx, lc, poolFor(state), state.NodeName, podNS, podName, podUID, args.ContainerID, args.IfName)
+	allocation, err := claimFabricIPs(ctx, lc, poolFor(state), state.ExcludedPodCIDRs, state.NodeName, podNS, podName, podUID, args.ContainerID, args.IfName)
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +473,7 @@ func addVPCs(ctx context.Context, args *skel.CmdArgs, conf *NetConf, atts []atta
 	if err != nil {
 		return err
 	}
-	allocation, err := claimFabricIPs(ctx, lc, poolOfFamily(poolFor(state), wantV6),
+	allocation, err := claimFabricIPs(ctx, lc, poolOfFamily(poolFor(state), wantV6), state.ExcludedPodCIDRs,
 		state.NodeName, podNS, podName, podUID, args.ContainerID, args.IfName)
 	if err != nil {
 		return err

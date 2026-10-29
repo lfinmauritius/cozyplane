@@ -60,7 +60,7 @@ func TestFabricIPSandboxLookupsUseCompletePages(t *testing.T) {
 			}
 			var err error
 			if mode == "ADD retry" || mode == "ADD incomplete" {
-				allocation, e := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24"}, "node", "tenant", "pod", "pod-uid", "sandbox", "eth0")
+				allocation, e := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24"}, nil, "node", "tenant", "pod", "pod-uid", "sandbox", "eth0")
 				err = e
 				if mode == "ADD retry" && (e != nil || len(allocation.Addresses) != 1 || allocation.Addresses[0].String() != claims[target].Spec.Address || mutations != 0) {
 					t.Fatal("retry did not reuse its final-page claim", e)

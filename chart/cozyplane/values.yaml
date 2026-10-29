@@ -51,6 +51,11 @@ egress:
   # (pods get an off-cluster return path) and is denied to VPC tenants at
   # their gateways. Empty disables both.
   clusterCIDR: "10.244.0.0/16"
+  # Blocks of clusterCIDR no new pod address is drawn from, for a platform
+  # reservation such as Cozystack's Cilium router block (the last /21 of the
+  # pod CIDR): ["10.244.248.0/21"]. Pods already holding an address there keep
+  # it until they are recreated.
+  podCIDRExclude: []
   # Masquerade implementation: "bpf" (eBPF SNAT at the uplink, no netfilter,
   # both families), "iptables" (legacy kernel rule, v4 only), or "off".
   masquerade: "bpf"

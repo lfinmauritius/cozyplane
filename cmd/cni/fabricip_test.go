@@ -22,7 +22,7 @@ func TestFabricSandboxRetryAndStaleDEL(t *testing.T) {
 	oldID, newID := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	allocate := func(container string) *fabricAllocation {
 		t.Helper()
-		allocation, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24", "fd00::/120"}, "node-a", "tenant", "pod", "pod-uid", container, "eth0")
+		allocation, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24", "fd00::/120"}, nil, "node-a", "tenant", "pod", "pod-uid", container, "eth0")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -88,20 +88,57 @@ func TestFabricAllocatorSkipsReservedCandidate(t *testing.T) {
 		t.Fatal("could not build reserved-candidate fixture")
 	}
 	client := localfake.NewSimpleClientset()
-	allocation, err := claimFabricIPs(t.Context(), client, []string{"169.254.40.0/22"}, "node", "tenant", "pod", uid, "sandbox", "eth0")
+	allocation, err := claimFabricIPs(t.Context(), client, []string{"169.254.40.0/22"}, nil, "node", "tenant", "pod", uid, "sandbox", "eth0")
 	if err != nil || len(allocation.Addresses) != 1 || allocation.Addresses[0].String() != "169.254.42.2" {
 		t.Fatalf("did not skip reserved candidate without restarting the pool: %v %v", allocation, err)
+	}
+}
+
+// uidStartingIn finds a pod UID whose first fabric candidate, in a pool of
+// span addresses, sits at an offset within [lo, hi] from the pool base.
+func uidStartingIn(t *testing.T, span, lo, hi uint64) string {
+	t.Helper()
+	for i := range 200000 {
+		value := fmt.Sprintf("sandbox-%d", i)
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(value))
+		if start := 2 + h.Sum64()%(span-2); start >= lo && start <= hi {
+			return value
+		}
+	}
+	t.Fatal("could not build excluded-candidate fixture")
+	return ""
+}
+
+func TestFabricAllocatorJumpsExcludedBlock(t *testing.T) {
+	// The last /21 of a /16 holds 2048 addresses, more than the walk may try:
+	// the allocator must jump the block, wrap past the pool end and land low.
+	uid := uidStartingIn(t, 1<<16, 248<<8, 1<<16-1)
+	client := localfake.NewSimpleClientset()
+	allocation, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/16"}, []string{"10.244.248.0/21"}, "node", "tenant", "pod", uid, "sandbox", "eth0")
+	if err != nil || len(allocation.Addresses) != 1 || allocation.Addresses[0].String() != "10.244.0.2" {
+		t.Fatalf("did not jump the excluded block: %v %v", allocation, err)
+	}
+}
+
+func TestFabricAllocatorRefusesFullyExcludedPoolAndBadExclusion(t *testing.T) {
+	client := localfake.NewSimpleClientset()
+	if _, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24"}, []string{"10.244.0.0/16"}, "node", "tenant", "pod", "uid", "sandbox", "eth0"); err == nil {
+		t.Fatal("allocated inside a fully excluded pool")
+	}
+	if _, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24"}, []string{"10.244.248.0/33"}, "node", "tenant", "pod", "uid", "sandbox", "eth0"); err == nil {
+		t.Fatal("malformed exclusion accepted")
 	}
 }
 
 func TestFabricRollbackDoesNotReleaseReusedClaims(t *testing.T) {
 	client := localfake.NewSimpleClientset()
 	args := []string{"node-a", "tenant", "pod", "uid", "sandbox", "eth0"}
-	allocation, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24"}, args[0], args[1], args[2], args[3], args[4], args[5])
+	allocation, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24"}, nil, args[0], args[1], args[2], args[3], args[4], args[5])
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24", "invalid"}, args[0], args[1], args[2], args[3], args[4], args[5])
+	_, err = claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24", "invalid"}, nil, args[0], args[1], args[2], args[3], args[4], args[5])
 	if err == nil {
 		t.Fatal("invalid pool accepted")
 	}
@@ -120,7 +157,7 @@ func TestFabricConcurrentRetryReusesCreateWinner(t *testing.T) {
 		// Simulate another retry winning between List and Create.
 		return true, nil, apierrors.NewAlreadyExists(localv1alpha1.Resource("fabricips"), claim.Name)
 	})
-	allocation, err := claimFabricIPs(context.Background(), client, []string{"10.244.0.0/24"}, "node", "tenant", "pod", "uid", "sandbox", "eth0")
+	allocation, err := claimFabricIPs(context.Background(), client, []string{"10.244.0.0/24"}, nil, "node", "tenant", "pod", "uid", "sandbox", "eth0")
 	if err != nil || len(allocation.Created) != 0 || len(allocation.Addresses) != 1 {
 		t.Fatalf("concurrent retry failed: %v %v", allocation, err)
 	}
@@ -133,7 +170,7 @@ func TestFabricConcurrentRetryReusesCreateWinner(t *testing.T) {
 func TestFabricDELWithoutPodUIDIsInterfaceScoped(t *testing.T) {
 	client := localfake.NewSimpleClientset()
 	for _, ifName := range []string{"eth0", "eth1"} {
-		if _, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24"}, "node", "tenant", "pod", "uid", "sandbox", ifName); err != nil {
+		if _, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/24"}, nil, "node", "tenant", "pod", "uid", "sandbox", ifName); err != nil {
 			t.Fatal(err)
 		}
 	}

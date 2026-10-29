@@ -95,6 +95,7 @@ func main() {
 		writeCNI            bool
 		genevePort          uint
 		clusterCIDR         string
+		podCIDRExclude      string
 		internalCIDRs       string
 		masqMode            string
 		vpcDNS              bool
@@ -113,6 +114,8 @@ func main() {
 		"Geneve UDP destination port (use a non-default port to coexist with another overlay on 6081)")
 	flag.StringVar(&clusterCIDR, "cluster-cidr", "",
 		"cluster pod supernet; when set, pod traffic leaving it is masqueraded to the node address (pod egress to the outside)")
+	flag.StringVar(&podCIDRExclude, "pod-cidr-exclude", "",
+		"comma-separated blocks of --cluster-cidr no new pod address is drawn from (a platform reservation)")
 	flag.StringVar(&masqMode, "masquerade", "bpf",
 		"cluster-egress masquerade implementation: bpf (eBPF SNAT at the uplink, no netfilter), iptables (kernel MASQUERADE rule), off (the environment masquerades elsewhere)")
 	flag.StringVar(&internalCIDRs, "internal-cidrs", "",
@@ -141,13 +144,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := run(nodeName, mtu, uint32(vni), cniConfName, writeCNI, uint16(genevePort), clusterCIDR, internalCIDRs, masqMode, vpcDNS, clusterDNSIPs, floatingNextHopIPv4, metricsAddr, metricsSecure, flowsEnabled, log); err != nil {
+	if err := run(nodeName, mtu, uint32(vni), cniConfName, writeCNI, uint16(genevePort), clusterCIDR, podCIDRExclude, internalCIDRs, masqMode, vpcDNS, clusterDNSIPs, floatingNextHopIPv4, metricsAddr, metricsSecure, flowsEnabled, log); err != nil {
 		log.Error("agent failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(nodeName string, mtu int, vni uint32, cniConfName string, writeCNI bool, genevePort uint16, clusterCIDR, internalCIDRs, masqMode string, vpcDNS bool, clusterDNSIPs, floatingNextHopIPv4, metricsAddr string, metricsSecure, flowsEnabled bool, log *slog.Logger) error {
+func run(nodeName string, mtu int, vni uint32, cniConfName string, writeCNI bool, genevePort uint16, clusterCIDR, podCIDRExclude, internalCIDRs, masqMode string, vpcDNS bool, clusterDNSIPs, floatingNextHopIPv4, metricsAddr string, metricsSecure, flowsEnabled bool, log *slog.Logger) error {
+	// Refuse a malformed exclusion up front: the CNI would otherwise fail
+	// every ADD on it, long after the agent looked healthy.
+	for _, c := range splitCIDRs(podCIDRExclude) {
+		if _, _, err := net.ParseCIDR(c); err != nil {
+			return fmt.Errorf("--pod-cidr-exclude %q: %w", c, err)
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -327,13 +337,14 @@ func run(nodeName string, mtu int, vni uint32, cniConfName string, writeCNI bool
 	// new to configure. Unset, the CNI falls back to the node's slice, which is
 	// the pre-flat behaviour.
 	state := &datapath.AgentState{
-		NodeName:        nodeName,
-		NodeIP:          internalIP(self),
-		PodCIDR:         podCIDR,
-		PodCIDRs:        podCIDRs,
-		ClusterPodCIDRs: splitCIDRs(clusterCIDR),
-		MTU:             mtu,
-		Namespace:       os.Getenv("AGENT_NAMESPACE"), // gates gateway-attach to the system namespace
+		NodeName:         nodeName,
+		NodeIP:           internalIP(self),
+		PodCIDR:          podCIDR,
+		PodCIDRs:         podCIDRs,
+		ClusterPodCIDRs:  splitCIDRs(clusterCIDR),
+		ExcludedPodCIDRs: splitCIDRs(podCIDRExclude),
+		MTU:              mtu,
+		Namespace:        os.Getenv("AGENT_NAMESPACE"), // gates gateway-attach to the system namespace
 	}
 	if err := state.Save(); err != nil {
 		return fmt.Errorf("publish agent state: %w", err)
