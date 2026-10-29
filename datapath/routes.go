@@ -45,7 +45,13 @@ type RouteEntry struct {
 	// GwIP/NodeIP retain source compatibility for single-next-hop callers.
 	GwIP   net.IP
 	NodeIP net.IP
+	// VPN marks a route a VPNGateway published: its prefix may cross a managed
+	// boundary, sourced only by the appliance it names (ROUTE_F_VPN).
+	VPN bool
 }
+
+// routeFlagVPN mirrors ROUTE_F_VPN in bpf/overlay.c.
+const routeFlagVPN = 1
 
 // RouteNextHop is one appliance leg in an ECMP route. NodeIP is nil when the
 // leg is local to the programming agent.
@@ -173,6 +179,9 @@ func routeMapEntry(d RouteEntry) (overlayLpmKey, overlayRouteEntry, error) {
 	e := overlayRouteEntry{Count: 1}
 	if len(nextHops) == 2 {
 		e.Count = 2
+	}
+	if d.VPN && len(nextHops) > 0 { // a blackholed prefix names no appliance to trust
+		e.Flags = routeFlagVPN
 	}
 	for i, nextHop := range nextHops {
 		gw, err := addr128(nextHop.GwIP)

@@ -1472,7 +1472,7 @@ func watchRoutes(ctx context.Context, factory sdninformers.SharedInformerFactory
 	// resolveRoutes turns a set of status routes (the shape both VPCGateway and
 	// VPNGateway publish) into datapath entries, resolving each next-hop Port to
 	// its IP and node. Unresolved next hops retain a blackhole prefix.
-	resolveRoutes := func(ref sdnv1alpha1.VPCRef, routes []sdnv1alpha1.VPCGatewayRouteStatus, out *[]datapath.RouteEntry) error {
+	resolveRoutes := func(ref sdnv1alpha1.VPCRef, routes []sdnv1alpha1.VPCGatewayRouteStatus, vpn bool, out *[]datapath.RouteEntry) error {
 		vpc, err := vpcs.Lister().VPCs(ref.Namespace).Get(ref.Name)
 		if err != nil || vpc.DeletionTimestamp != nil || vpc.Status.VNI <= 0 {
 			return nil
@@ -1523,7 +1523,7 @@ func watchRoutes(ctx context.Context, factory sdninformers.SharedInformerFactory
 					return fmt.Errorf("route candidates exceed map capacity %d", maxRows)
 				}
 				*out = append(*out, datapath.RouteEntry{
-					Scope: vni, CIDR: cidr, NextHops: nextHops,
+					Scope: vni, CIDR: cidr, NextHops: nextHops, VPN: vpn,
 				})
 			}
 		}
@@ -1550,7 +1550,7 @@ func watchRoutes(ctx context.Context, factory sdninformers.SharedInformerFactory
 			return
 		}
 		groups := map[string]*routeNamespace{}
-		add := func(ref sdnv1alpha1.VPCRef, routes []sdnv1alpha1.VPCGatewayRouteStatus) error {
+		add := func(ref sdnv1alpha1.VPCRef, routes []sdnv1alpha1.VPCGatewayRouteStatus, vpn bool) error {
 			vpc, err := vpcs.Lister().VPCs(ref.Namespace).Get(ref.Name)
 			if err != nil || vpc.DeletionTimestamp != nil || vpc.Status.VNI <= 0 {
 				return nil
@@ -1602,13 +1602,13 @@ func watchRoutes(ctx context.Context, factory sdninformers.SharedInformerFactory
 					}
 				}
 			}
-			group.inputs = append(group.inputs, routeInput{ref: ref, routes: routes})
+			group.inputs = append(group.inputs, routeInput{ref: ref, routes: routes, vpn: vpn})
 			return nil
 		}
 		for ref, candidates := range gatewayCandidatesByVPC(allGW) {
 			gw := sdnv1alpha1.EffectiveGateway(candidates, ref.Name)
 			if gw != nil {
-				if err := add(ref, gw.Status.Routes); err != nil {
+				if err := add(ref, gw.Status.Routes, false); err != nil {
 					log.Error("reject route snapshot", "err", err)
 					return
 				}
@@ -1638,7 +1638,7 @@ func watchRoutes(ctx context.Context, factory sdninformers.SharedInformerFactory
 			// Prove only declared scopes. An invalid legacy hub denies its owner,
 			// while unrelated namespaces retain their complete route snapshot.
 			for name := range allowed {
-				if err := add(sdnv1alpha1.VPCRef{Namespace: gw.Namespace, Name: name}, nil); err != nil {
+				if err := add(sdnv1alpha1.VPCRef{Namespace: gw.Namespace, Name: name}, nil, true); err != nil {
 					invalid = true
 				}
 			}
@@ -1663,7 +1663,7 @@ func watchRoutes(ctx context.Context, factory sdninformers.SharedInformerFactory
 				continue
 			}
 			for name, routes := range byVPC {
-				if err := add(sdnv1alpha1.VPCRef{Namespace: gw.Namespace, Name: name}, routes); err != nil {
+				if err := add(sdnv1alpha1.VPCRef{Namespace: gw.Namespace, Name: name}, routes, true); err != nil {
 					log.Error("reject VPN route snapshot", "err", err)
 					return
 				}
@@ -1684,7 +1684,7 @@ func watchRoutes(ctx context.Context, factory sdninformers.SharedInformerFactory
 				continue
 			}
 			for _, input := range group.inputs {
-				if err := resolveRoutes(input.ref, input.routes, &desired); err != nil {
+				if err := resolveRoutes(input.ref, input.routes, input.vpn, &desired); err != nil {
 					log.Error("reject route snapshot", "err", err)
 					return
 				}

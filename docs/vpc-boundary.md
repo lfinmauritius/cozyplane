@@ -56,8 +56,15 @@ they own their pinned VPC address. Those frames must reach only the local veth
 responder, with exact control-message, source-scope and destination checks;
 arbitrary link-local data must still face source authentication. An explicit
 guest address is not evidence that automatic configuration works.
-Tenant forwarding legs are denied transit by a managed boundary unless future
-policy explicitly supports it; forwarding grants do not bypass this boundary.
+Tenant forwarding legs are denied transit by a managed boundary; forwarding
+grants do not bypass this boundary. The single exception is a VPN prefix: a
+route a VPNGateway publishes (`status.routes`, written only by the controller,
+toward a Port it proved to be the gateway's own appliance) carries
+`ROUTE_F_VPN`. The appliance's veth may source that prefix — no other port may,
+whatever its grant — and the destination admits a forwarded packet only from
+such a prefix. Traffic toward that prefix is not Internet egress, so it needs no
+`internet` permission. Each node holds the same routes, so both ends decide
+alike; a blackholed prefix (appliance not usable) carries no flag.
 
 The portal must wait for all relevant agent instances to acknowledge the desired
 revision before reporting application or completed revocation. Ready allocation

@@ -398,6 +398,16 @@ allocation (so a denied packet leaks no connection state):
 The east-west `to_pod` check is unchanged (it runs only for non-bridge,
 non-floating traffic — those paths return earlier).
 
+A VPN appliance is a floating pod like any other, so a tenant group that selects
+it (an empty selector selects every pod of the VPC) would close its tunnel port.
+Each VPNGateway therefore owns a group `<gateway>-vpn` selecting its appliance:
+UDP to the listen port (WireGuard) or 500/4500 (IPsec) from `0.0.0.0/0`, TCP 9410
+(status and metrics) from the controller's `--internal-cidrs` only — a group
+member would otherwise refuse the controller's own status reads — and UDP egress
+to `0.0.0.0/0` and `::/0` for the tunnel itself (egress CIDRs compile per
+family). The controller restores it if edited and deletes it with the gateway;
+it never adopts a group of that name it does not control.
+
 ### Stages
 
 - **Stage 1 — world + kubelet exemption (built, dev-cluster-validated).**

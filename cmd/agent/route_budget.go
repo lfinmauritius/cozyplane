@@ -9,6 +9,8 @@ import (
 type routeInput struct {
 	ref    sdn.VPCRef
 	routes []sdn.VPCGatewayRouteStatus
+	// vpn: published by a VPNGateway, the managed boundary's transit exception.
+	vpn bool
 }
 
 type routeNamespace struct {

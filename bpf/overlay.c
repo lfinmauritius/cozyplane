@@ -387,8 +387,15 @@ struct gw_entry {
 struct route_entry {
 	struct gw_entry next_hops[ROUTE_NH_MAX];
 	__u8 count;
-	__u8 pad[7];
+	__u8 flags;
+	__u8 pad[6];
 };
+
+// ROUTE_F_VPN marks a route a VPNGateway published (VPNGateway.status.routes):
+// only the controller writes that status, and only toward a Port it proved to be
+// the gateway's own appliance. It is the managed boundary's single transit
+// exception (docs/vpc-boundary.md).
+#define ROUTE_F_VPN 1
 
 // gateways: network id -> egress gateway. Off-VPC traffic from a pod in the
 // network is delivered to the gateway instead of being dropped.
@@ -2425,6 +2432,36 @@ static __always_inline struct endpoint *local_of(__u32 net, struct addr128 ip)
 {
 	struct local_key key = { .net = net, .ip = ip };
 	return bpf_map_lookup_elem(&locals, &key);
+}
+
+// vpn_route: the VPN route covering `addr` in `net` (a workstation or a remote
+// site behind the VPC's own appliance), or NULL. A blackholed prefix — its
+// appliance not usable yet — is published without ROUTE_F_VPN.
+static __always_inline struct route_entry *vpn_route(__u32 net, struct addr128 addr)
+{
+	struct route_entry *route = route_of(net, addr);
+	if (!route || !(route->flags & ROUTE_F_VPN) || route->count == 0 || route->count > ROUTE_NH_MAX)
+		return NULL;
+	return route;
+}
+
+// vpn_appliance_source: `src` belongs to a VPN prefix routed to the very port
+// the packet leaves from — the appliance relaying its own tunnel's traffic. Any
+// other port sourcing that prefix is spoofing it.
+static __always_inline int vpn_appliance_source(__u32 net, struct addr128 src, __u32 ifindex)
+{
+	struct route_entry *route = vpn_route(net, src);
+	if (!route)
+		return 0;
+#pragma unroll
+	for (int i = 0; i < ROUTE_NH_MAX; i++) {
+		if (i >= route->count)
+			break;
+		struct endpoint *leg = local_of(net, route->next_hops[i].gw_ip);
+		if (leg && leg->ifindex == ifindex)
+			return 1;
+	}
+	return 0;
 }
 
 static __always_inline int is_internal(struct addr128 addr)
@@ -5706,6 +5743,9 @@ static __attribute__((noinline)) int boundary_gate(struct __sk_buff *skb, struct
 		if (s->key.hook) return 1;
 		s->cidr.prefixlen = 128; s->cidr.addr = s->packet.dst;
 		if (bpf_map_lookup_elem(&boundary_cidrs, &s->cidr)) return 0;
+		// A workstation or remote site is reached through the VPC's own VPN
+		// appliance, not the Internet: no Internet grant is involved.
+		if (vpn_route(s->key.local, s->packet.dst)) return 1;
 		s->endpoint.net = s->key.local; s->endpoint.ip = s->packet.src;
 		return local->internet && bpf_map_lookup_elem(&boundary_primary, &s->endpoint);
 	}
@@ -5845,7 +5885,8 @@ int cozyplane_from_pod(struct __sk_buff *skb)
 		if (!bp && peer_policy) return TC_ACT_SHOT;
 		if (bp && !(port && (*port & PORT_F_GATEWAY))) {
 			struct endpoint *self = local_of(net, s->packet.src);
-			if (!self || self->ifindex != skb->ifindex) return TC_ACT_SHOT;
+			if (self ? self->ifindex != skb->ifindex
+			         : !vpn_appliance_source(net, s->packet.src, skb->ifindex)) return TC_ACT_SHOT;
 			struct addr128 gw4, gw6 = LINK_LOCAL_GW6;
 			v4_to_128(&gw4,bpf_htonl(LINK_LOCAL_GW));
 			int plumbing = addr128_eq(&s->packet.dst, &gw4) || addr128_eq(&s->packet.dst, &gw6) ||
@@ -6389,8 +6430,10 @@ int cozyplane_to_pod(struct __sk_buff *skb)
 	if (net && parse_ip(skb, &s->packet) == 0) {
 		s->key.local = net; s->key.peer = net_of(&networks, net, s->packet.src);
 		s->key.src = s->packet.src; s->key.dst = s->packet.dst; s->key.hook = 1;
+		// Forwarded traffic crosses a managed boundary only from a VPN prefix:
+		// the sending node already proved it left that prefix's own appliance.
 		if (bpf_map_lookup_elem(&boundary_policy, &net) &&
-		    (skb->mark & FWD_MARK)) return TC_ACT_SHOT;
+		    (skb->mark & FWD_MARK) && !vpn_route(net, s->packet.src)) return TC_ACT_SHOT;
 		if (!boundary_gate(skb, s)) return TC_ACT_SHOT;
 	}
 	bpf_tail_call(skb, &lb_prog, 5);

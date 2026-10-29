@@ -239,6 +239,7 @@ func haMode(gw *sdnv1alpha1.VPNGateway) sdnv1alpha1.VPNGatewayHAMode {
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpnconnections/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=vpcbindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=floatingips,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=sdn.cozystack.io,resources=securitygroups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sdn.cozystack.io,resources=ports,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
@@ -428,6 +429,9 @@ func (r *VPNGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.ensureApplianceWorkload(ctx, gw, backend, checksum); err != nil {
 		return r.configurationFailure(ctx, gw, err)
 	}
+	if err := r.ensureAccessSecurityGroup(ctx, gw, backend); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Resolve one selected leg for ordinary/warm-standby gateways and two for
 	// active-active. Each active leg gets its own stable FloatingIP endpoint.
@@ -614,6 +618,7 @@ func (r *VPNGatewayReconciler) teardownOwned(ctx context.Context, gw *sdnv1alpha
 		&sdnv1alpha1.FloatingIP{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gw.Namespace}},
 		&sdnv1alpha1.FloatingIP{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: gw.Namespace}},
 		&sdnv1alpha1.FloatingIP{ObjectMeta: metav1.ObjectMeta{Name: name + "-1", Namespace: gw.Namespace}},
+		&sdnv1alpha1.SecurityGroup{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gw.Namespace}},
 	}
 	for _, o := range objs {
 		if err := r.deleteVPNOwned(ctx, gw, o); err != nil {
@@ -2534,6 +2539,69 @@ func (r *VPNGatewayReconciler) pruneFloatingIPs(ctx context.Context, gw *sdnv1al
 	return nil
 }
 
+// ensureAccessSecurityGroup admits the tunnel's own ports from every client
+// address. Any tenant group that selects the appliance — an empty selector
+// selects every pod of the VPC — makes it default-deny north-south, and the
+// floating path would drop the handshake before DNAT (docs/security-groups.md).
+// Egress is UDP only: the appliance answers and initiates tunnels, nothing else.
+func (r *VPNGatewayReconciler) ensureAccessSecurityGroup(ctx context.Context, gw *sdnv1alpha1.VPNGateway, backend string) error {
+	ports := []sdnv1alpha1.SecurityGroupPort{{Protocol: "UDP", Port: r.listenPort(gw)}}
+	if backend == backendIPsec {
+		ports = []sdnv1alpha1.SecurityGroupPort{{Protocol: "UDP", Port: 500}, {Protocol: "UDP", Port: 4500}}
+	}
+	ingress := []sdnv1alpha1.SecurityGroupRule{{From: sdnv1alpha1.SecurityGroupPeer{CIDR: "0.0.0.0/0"}, Ports: ports}}
+	// As a group member the appliance would also refuse this controller's status reads and the metrics scrape,
+	// both on :9410 from the cluster's own networks.
+	for _, cidr := range r.Config.InternalCIDRs {
+		ingress = append(ingress, sdnv1alpha1.SecurityGroupRule{
+			From:  sdnv1alpha1.SecurityGroupPeer{CIDR: cidr.String()},
+			Ports: []sdnv1alpha1.SecurityGroupPort{{Protocol: "TCP", Port: 9410}},
+		})
+	}
+	udp := []sdnv1alpha1.SecurityGroupPort{{Protocol: "UDP"}}
+	desired := &sdnv1alpha1.SecurityGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gw.Name + "-vpn",
+			Namespace: gw.Namespace,
+			Labels:    map[string]string{vpnGatewayLabel: gw.Name},
+		},
+		Spec: sdnv1alpha1.SecurityGroupSpec{
+			VPCRef:      sdnv1alpha1.LocalVPCRef{Name: gw.Spec.VPCRef.Name},
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{vpnGatewayLabel: gw.Name}},
+			Ingress:     ingress,
+			// Egress `to.cidr` compiles per family, unlike the world source above.
+			Egress: []sdnv1alpha1.SecurityGroupEgressRule{
+				{To: sdnv1alpha1.SecurityGroupPeer{CIDR: "0.0.0.0/0"}, Ports: udp},
+				{To: sdnv1alpha1.SecurityGroupPeer{CIDR: "::/0"}, Ports: udp},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(gw, desired, r.Scheme); err != nil {
+		return err
+	}
+	existing := &sdnv1alpha1.SecurityGroup{}
+	err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
+	switch {
+	case apierrors.IsNotFound(err):
+		if err := r.Create(ctx, desired); err != nil {
+			return fmt.Errorf("create SecurityGroup: %w", err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("get SecurityGroup: %w", err)
+	}
+	if err := requireVPNOwner(existing, gw); err != nil {
+		return err
+	}
+	if !equality.Semantic.DeepEqual(existing.Spec, desired.Spec) {
+		existing.Spec = desired.Spec
+		if err := r.Update(ctx, existing); err != nil {
+			return fmt.Errorf("update SecurityGroup: %w", err)
+		}
+	}
+	return nil
+}
+
 // reflectConnectionStatus combines route readiness with the appliance's live
 // kernel/IKE state. Routes alone never imply an established tunnel.
 func (r *VPNGatewayReconciler) reflectConnectionStatus(ctx context.Context, conns []sdnv1alpha1.VPNConnection,
@@ -2741,6 +2809,7 @@ func (r *VPNGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&sdnv1alpha1.VPCBinding{}).
 		Owns(&sdnv1alpha1.FloatingIP{}).
+		Owns(&sdnv1alpha1.SecurityGroup{}).
 		Watches(&sdnv1alpha1.VPC{}, handler.EnqueueRequestsFromMapFunc(r.mapVPCToVPNGateways)).
 		Watches(&sdnv1alpha1.VPNConnection{}, handler.EnqueueRequestsFromMapFunc(r.mapConnectionToGateway), builder.WithPredicates(vpnConnectionEvents())).
 		Watches(&sdnv1alpha1.Port{}, handler.EnqueueRequestsFromMapFunc(r.mapPortToVPNGateways)).

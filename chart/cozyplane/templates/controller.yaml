@@ -50,10 +50,11 @@ rules:
   - apiGroups: ["k8s.cni.cncf.io"]
     resources: ["network-attachment-definitions"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
-  # SecurityGroups: id allocation (status) + selector evaluation.
+  # SecurityGroups: id allocation (status) + selector evaluation; a VPN gateway
+  # owns the group that admits its tunnel ports.
   - apiGroups: ["sdn.cozystack.io"]
     resources: ["securitygroups"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["sdn.cozystack.io"]
     resources: ["securitygroups/status"]
     verbs: ["get", "update", "patch"]

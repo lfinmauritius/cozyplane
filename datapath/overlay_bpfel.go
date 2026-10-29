@@ -313,7 +313,8 @@ type overlayRouteEntry struct {
 	_        structs.HostLayout
 	NextHops [2]overlayGwEntry
 	Count    uint8
-	Pad      [7]uint8
+	Flags    uint8
+	Pad      [6]uint8
 }
 
 type overlayRouteScopeGuard struct {
