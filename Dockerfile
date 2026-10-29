@@ -7,7 +7,7 @@
 # Bases are digest-pinned for digest-reproducible releases (#4): a floating tag
 # resolving to a new base silently changes every layer above it. Bump the pins
 # deliberately.
-FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
