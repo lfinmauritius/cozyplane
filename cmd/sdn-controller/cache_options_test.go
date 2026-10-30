@@ -27,7 +27,7 @@ func TestControllerCacheLeavesHelmReleasesOut(t *testing.T) {
 		{labels.Set{"owner": "helm", "name": "cozyplane"}, false},
 		{labels.Set{}, true},
 		{labels.Set{"owner": "someone-else"}, true},
-		{labels.Set{"cozyplane.io/wg-client-state": "true"}, true},
+		{labels.Set{"sdn.cozystack.io/wireguard-client-state": "true"}, true},
 	} {
 		if got := sel.Matches(tc.labels); got != tc.cached {
 			t.Errorf("labels %v: cached=%t, want %t", tc.labels, got, tc.cached)
