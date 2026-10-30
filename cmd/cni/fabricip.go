@@ -182,13 +182,7 @@ func claimOne(ctx context.Context, client localclientset.Interface, cidr string,
 	if shift := uint(bits - ones); shift < 64 {
 		span = uint64(1) << shift
 	}
-	start := uint64(2)
-	if span > 4 {
-		h := fnv.New64a()
-		_, _ = h.Write([]byte(podUID))
-		// Skip the network address and the node-gateway convention (.0/.1).
-		start = 2 + h.Sum64()%(span-2)
-	}
+	start := spreadStart(podUID, 0, span)
 
 	// Bound the walk. In a healthy pool the first candidate wins; a long run of
 	// conflicts means the pool is full or something is badly wrong, and hammering
@@ -208,10 +202,12 @@ func claimOne(ctx context.Context, client localclientset.Interface, cidr string,
 			candidate = nextIP(candidate)
 			continue
 		}
-		if hole := containingNet(holes, candidate); hole != nil {
-			// Jump the whole block in one step: a /21 holds more addresses
-			// than the walk is allowed to try.
-			candidate = nextIP(lastAddress(hole))
+		if containingNet(holes, candidate) != nil {
+			// Re-spread instead of stepping through or past the block: a /21
+			// holds more addresses than the walk may try, and stepping to the
+			// address after it would make every pod that starts in the block
+			// queue behind the same address under the same bounded walk.
+			candidate = addOffset(ipnet.IP, spreadStart(podUID, tried+1, span))
 			continue
 		}
 		fip := &localv1alpha1.FabricIP{
@@ -270,13 +266,19 @@ func containingNet(nets []*net.IPNet, ip net.IP) *net.IPNet {
 	return nil
 }
 
-// lastAddress returns the highest address of n, in n's own width.
-func lastAddress(n *net.IPNet) net.IP {
-	out := cloneIP(n.IP)
-	for i := range out {
-		out[i] |= ^n.Mask[i]
+// spreadStart derives a walk start from the pod UID, skipping the network
+// address and the node-gateway convention (.0/.1). Round 0 is the historical
+// start; later rounds re-spread a walk that landed in an excluded block.
+func spreadStart(podUID string, round, span uint64) uint64 {
+	if span <= 4 {
+		return 2
 	}
-	return out
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(podUID))
+	if round > 0 {
+		_, _ = h.Write([]byte(fmt.Sprintf("\x00%d", round)))
+	}
+	return 2 + h.Sum64()%(span-2)
 }
 
 // addOffset returns base + n (big-endian, both families).

@@ -94,30 +94,40 @@ func TestFabricAllocatorSkipsReservedCandidate(t *testing.T) {
 	}
 }
 
-// uidStartingIn finds a pod UID whose first fabric candidate, in a pool of
+// uidsStartingIn finds n pod UIDs whose first fabric candidate, in a pool of
 // span addresses, sits at an offset within [lo, hi] from the pool base.
-func uidStartingIn(t *testing.T, span, lo, hi uint64) string {
+func uidsStartingIn(t *testing.T, n int, span, lo, hi uint64) []string {
 	t.Helper()
-	for i := range 200000 {
+	var out []string
+	for i := 0; len(out) < n && i < 2000000; i++ {
 		value := fmt.Sprintf("sandbox-%d", i)
 		h := fnv.New64a()
 		_, _ = h.Write([]byte(value))
 		if start := 2 + h.Sum64()%(span-2); start >= lo && start <= hi {
-			return value
+			out = append(out, value)
 		}
 	}
-	t.Fatal("could not build excluded-candidate fixture")
-	return ""
+	if len(out) < n {
+		t.Fatal("could not build excluded-candidate fixture")
+	}
+	return out
 }
 
-func TestFabricAllocatorJumpsExcludedBlock(t *testing.T) {
-	// The last /21 of a /16 holds 2048 addresses, more than the walk may try:
-	// the allocator must jump the block, wrap past the pool end and land low.
-	uid := uidStartingIn(t, 1<<16, 248<<8, 1<<16-1)
+// The last /21 of a /16 holds 2048 addresses, more than the walk may try, and
+// every pod whose start falls in it must still get an address outside it — even
+// hundreds of them: stepping to the address after the block would make them all
+// queue behind the same one under the same bounded walk.
+func TestFabricAllocatorSpreadsPodsStartingInExcludedBlock(t *testing.T) {
+	_, hole, _ := net.ParseCIDR("10.244.248.0/21")
 	client := localfake.NewSimpleClientset()
-	allocation, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/16"}, []string{"10.244.248.0/21"}, "node", "tenant", "pod", uid, "sandbox", "eth0")
-	if err != nil || len(allocation.Addresses) != 1 || allocation.Addresses[0].String() != "10.244.0.2" {
-		t.Fatalf("did not jump the excluded block: %v %v", allocation, err)
+	for i, uid := range uidsStartingIn(t, 300, 1<<16, 248<<8, 1<<16-1) {
+		allocation, err := claimFabricIPs(t.Context(), client, []string{"10.244.0.0/16"}, []string{"10.244.248.0/21"}, "node", "tenant", fmt.Sprintf("pod-%d", i), uid, "sandbox", "eth0")
+		if err != nil {
+			t.Fatalf("pod %d starting in the excluded block got no address: %v", i, err)
+		}
+		if got := allocation.Addresses[0]; hole.Contains(got) {
+			t.Fatalf("pod %d allocated %s inside the excluded block", i, got)
+		}
 	}
 }
 
