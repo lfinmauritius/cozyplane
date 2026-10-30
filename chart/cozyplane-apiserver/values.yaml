@@ -44,8 +44,9 @@ etcd:
     # evicted member onto a survivor and it stays there after uncordon: two
     # members on one node, and losing that node loses quorum (the whole
     # sdn.cozystack.io API). Required leaves the evicted member Pending while
-    # the other two keep quorum. Override (preferred, or {}) where replicas
-    # exceed schedulable nodes. Applies to newly created members only.
+    # the other two keep quorum. Where replicas exceed schedulable nodes, set
+    # `affinity: null` (Helm merges maps: `{}` or a preferred rule would keep
+    # the required one). Applies to newly created members only.
     affinity:
       podAntiAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:

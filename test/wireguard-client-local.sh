@@ -32,7 +32,7 @@ case "${1:-}" in
     docker build --platform linux/amd64 -t "$ETCD_IMAGE" -f "$ROOT/test/wireguard-client-etcd.Dockerfile" "$ROOT/test"
     kind load docker-image "$ETCD_IMAGE" --name "$CLUSTER"
     "${K[@]}" apply -f "$ROOT/config/crd/"
-    sed -e "s#ghcr.io/lllamnyp/cozyplane:dev#$IMAGE#g" -e "s#registry.k8s.io/etcd:3.5.16-0#$ETCD_IMAGE#g" "$ROOT/deploy/apiserver.yaml" | "${K[@]}" apply -f -
+    sed -e "s#ghcr.io/lllamnyp/cozyplane:dev#$IMAGE#g" -e "s#registry.k8s.io/etcd:3.5.16-0@sha256:[0-9a-f]*#$ETCD_IMAGE#g" "$ROOT/deploy/apiserver.yaml" | "${K[@]}" apply -f -
     # Agent's host-network init installs the CNI before the API's fabric pods
     # can schedule. Its tenant informers retry until the API comes online.
     for f in agent controller authz; do
