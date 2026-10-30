@@ -29,11 +29,15 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -153,6 +157,7 @@ func main() {
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionID:        controllerLeaderElectionID,
 		LeaderElectionNamespace: controllerLeaderElectionNamespace,
+		Cache:                   controllerCacheOptions(),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -436,3 +441,23 @@ const (
 	controllerLeaderElectionID        = "sdn-controller.cozystack.io"
 	controllerLeaderElectionNamespace = "kube-system"
 )
+
+// controllerCacheOptions keeps the informer cache to what the controller reads.
+// The VPN reconciler owns and watches Secrets, which makes the Secret informer
+// cluster-wide; Helm stores every release revision as a Secret labelled
+// owner=helm, hundreds of them on a Cozystack cluster (a platform upgrade adds
+// one per release). Caching them OOM-killed the controller at its 128Mi limit.
+// It never reads a Helm release, so they stay out of the cache, and no cached
+// object keeps its managedFields.
+func controllerCacheOptions() cache.Options {
+	notHelm, err := labels.NewRequirement("owner", selection.NotIn, []string{"helm"})
+	if err != nil {
+		panic(err) // a constant requirement: only a programming error lands here
+	}
+	return cache.Options{
+		DefaultTransform: cache.TransformStripManagedFields(),
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Secret{}: {Label: labels.NewSelector().Add(*notHelm)},
+		},
+	}
+}
