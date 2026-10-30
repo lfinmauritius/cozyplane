@@ -122,6 +122,10 @@ spec:
     medium: Memory
     {{- end }}
     size: {{ .Values.etcd.operator.size }}
+  {{- with .Values.etcd.operator.affinity }}
+  affinity:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   options:
     autoCompactionMode: periodic
     autoCompactionRetention: "5m"
