@@ -4067,6 +4067,15 @@ static __always_inline int vpc_nat_reverse(struct __sk_buff *skb, struct pkt *p)
 
 #define MASQ_MISS -1
 
+// tcp_bare_syn reports a segment that OPENS a TCP connection: SYN set, ACK clear.
+static __always_inline int tcp_bare_syn(struct __sk_buff *skb, __u32 l4off)
+{
+	__u8 fl = 0;
+	if (bpf_skb_load_bytes(skb, l4off + 13, &fl, 1) < 0)
+		return 0;
+	return (fl & 0x02) && !(fl & 0x10);
+}
+
 // masq_snat is the cluster-egress bpf masquerade (#10), run in from_pod at the
 // uplink-egress attachment only: a packet whose source is a (default-network)
 // pod address and whose destination is off-cluster gets its source rewritten
@@ -4132,6 +4141,17 @@ static __always_inline int masq_snat(struct __sk_buff *skb, struct pkt *p)
 	if (have) {
 		gw_port = *have;
 	} else {
+		// Only a connection the pod OPENS is masqueraded. Any other TCP segment
+		// without a mapping is the pod answering a connection that came IN (a
+		// LoadBalancer or externalIP client outside the internal CIDRs), whose
+		// reply the service datapath reverses to the service address further down
+		// the uplink. SNATing it to the node IP first hands the client a reply
+		// from an address it never contacted: the connection never opens.
+		// ponytail: UDP has no opening to tell apart, so an inbound UDP service's
+		// reply to an off-cluster client is still masqueraded; a kernel conntrack
+		// lookup (bpf_skb_ct_lookup) would cover it.
+		if (proto == IPPROTO_TCP && !tcp_bare_syn(skb, L4_OFF))
+			return MASQ_MISS;
 		gw_port = alloc_gw_port_in(proto, 0, p->dst, dport, p->src, p->src, sport,
 					   MASQ_PORT_BASE, MASQ_PORT_SPAN);
 		if (!gw_port)
@@ -4389,6 +4409,9 @@ static __always_inline int masq_snat6(struct __sk_buff *skb, struct pkt *p)
 	if (have) {
 		gw_port = *have;
 	} else {
+		// Same rule as masq_snat: never masquerade the reply to an inbound flow.
+		if (proto == IPPROTO_TCP && !tcp_bare_syn(skb, L4_OFF6))
+			return MASQ_MISS;
 		gw_port = alloc_gw_port_in(proto, 0, p->dst, dport, src, src, sport,
 					   MASQ_PORT_BASE, MASQ_PORT_SPAN);
 		if (!gw_port)
